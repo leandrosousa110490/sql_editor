@@ -27,6 +27,12 @@ try:
 except ImportError:
     openpyxl = None
 
+# Import for CSV delimiter detection
+try:
+    import csv
+except ImportError:
+    csv = None
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QTreeWidget, QTreeWidgetItem, QTextEdit, QTableView, QHeaderView,
@@ -625,6 +631,90 @@ class QueryWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+class ImportWorker(QThread):
+    """Worker thread for non-blocking data imports"""
+    progress = pyqtSignal(int, str)  # progress percentage, status message
+    finished = pyqtSignal(bool, str)  # success, message
+    error = pyqtSignal(str)
+    
+    def __init__(self, main_app, import_info, is_folder=False):
+        super().__init__()
+        self.main_app = main_app
+        self.import_info = import_info
+        self.is_folder = is_folder
+    
+    def run(self):
+        try:
+            if self.is_folder:
+                self.progress.emit(10, "Starting folder import...")
+                success = self.main_app.import_folder_data(self.import_info)
+            else:
+                self.progress.emit(10, "Starting file import...")
+                success = self.main_app.import_data(self.import_info)
+            
+            if success:
+                self.progress.emit(100, "Import completed successfully!")
+                self.finished.emit(True, "Data imported successfully!")
+            else:
+                self.finished.emit(False, "Import failed. Check console for details.")
+                
+        except Exception as e:
+            self.error.emit(f"Import error: {str(e)}")
+
+class ProgressDialog(QDialog):
+    """Progress dialog for long-running operations"""
+    
+    def __init__(self, parent=None, title="Processing..."):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setFixedSize(400, 150)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
+        
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Status label
+        self.status_label = QLabel("Initializing...")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.status_label)
+        
+        # Progress bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        layout.addWidget(self.progress_bar)
+        
+        # Cancel button
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        self.cancel_button.setStyleSheet("""
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #c82333; }
+        """)
+        
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        button_layout.addWidget(self.cancel_button)
+        layout.addLayout(button_layout)
+    
+    def update_progress(self, value, message):
+        """Update progress bar and status message"""
+        self.progress_bar.setValue(value)
+        self.status_label.setText(message)
+        
+        # Auto-close when complete
+        if value >= 100:
+            QTimer.singleShot(1000, self.accept)  # Close after 1 second
+
 # Connection dialog
 class ConnectionDialog(QDialog):
     def __init__(self, parent=None):
@@ -913,11 +1003,24 @@ class DataImportDialog(QDialog):
         self.connection_info = connection_info
         self.setWindowTitle("Import Data")
         self.setModal(True)
-        self.setFixedSize(600, 550)
+        self.resize(850, 750)  # Made larger and resizable
+        self.setMinimumSize(700, 600)  # Set minimum size
         self.init_ui()
     
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        # Create main layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        
+        # Create scroll area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        
+        # Create content widget for scroll area
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setSpacing(15)
         layout.setContentsMargins(20, 20, 20, 20)
         
@@ -1046,9 +1149,32 @@ class DataImportDialog(QDialog):
         self.csv_options_widget = QWidget()
         csv_options_layout = QFormLayout(self.csv_options_widget)
         
+        delimiter_layout = QHBoxLayout()
         self.delimiter_edit = QLineEdit(",")
-        self.delimiter_edit.setMaximumWidth(50)
-        csv_options_layout.addRow("Delimiter:", self.delimiter_edit)
+        self.delimiter_edit.setMaximumWidth(80)
+        
+        self.auto_detect_button = QPushButton("🔍 Auto")
+        self.auto_detect_button.setMaximumWidth(60)
+        self.auto_detect_button.setToolTip("Auto-detect delimiter from file")
+        self.auto_detect_button.clicked.connect(self.auto_detect_delimiter)
+        self.auto_detect_button.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                border: none;
+                padding: 4px 8px;
+                border-radius: 3px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #138496; }
+        """)
+        
+        delimiter_layout.addWidget(self.delimiter_edit)
+        delimiter_layout.addWidget(self.auto_detect_button)
+        delimiter_layout.addStretch()
+        
+        csv_options_layout.addRow("Delimiter:", delimiter_layout)
         
         self.encoding_combo = QComboBox()
         self.encoding_combo.addItems(["utf-8", "latin-1", "cp1252", "utf-16"])
@@ -1111,6 +1237,51 @@ class DataImportDialog(QDialog):
         
         # Load existing tables if connection is available
         self.load_existing_tables()
+        
+        # Add content widget to scroll area and scroll area to main layout
+        scroll_area.setWidget(content_widget)
+        main_layout.addWidget(scroll_area)
+    
+    def auto_detect_delimiter(self):
+        """Auto-detect delimiter for the selected file"""
+        file_path = self.file_path_edit.text()
+        if not file_path or not os.path.exists(file_path):
+            QMessageBox.warning(self, "No File", "Please select a file first.")
+            return
+        
+        file_ext = os.path.splitext(file_path)[1].lower()
+        if file_ext not in ['.csv', '.txt', '.tsv']:
+            QMessageBox.information(self, "Not Applicable", "Auto-detection only works for CSV, TSV, and TXT files.")
+            return
+        
+        # Get the main app instance to use its detect_csv_delimiter method
+        main_app = self.parent()
+        while main_app and not hasattr(main_app, 'detect_csv_delimiter'):
+            main_app = main_app.parent()
+        
+        if main_app and hasattr(main_app, 'detect_csv_delimiter'):
+            detected_delimiter = main_app.detect_csv_delimiter(file_path)
+            
+            # Convert tab to visible representation
+            if detected_delimiter == '\t':
+                display_delimiter = '\\t'
+            else:
+                display_delimiter = detected_delimiter
+            
+            self.delimiter_edit.setText(display_delimiter)
+            
+            # Show confirmation
+            delimiter_name = {
+                ',': 'comma',
+                ';': 'semicolon', 
+                '\t': 'tab',
+                '|': 'pipe'
+            }.get(detected_delimiter, f"'{detected_delimiter}'")
+            
+            QMessageBox.information(self, "Delimiter Detected", 
+                                  f"Detected delimiter: {delimiter_name} ({display_delimiter})")
+        else:
+            QMessageBox.warning(self, "Error", "Could not access delimiter detection functionality.")
     
     def browse_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1155,8 +1326,21 @@ class DataImportDialog(QDialog):
                 self.sheet_group.hide()
                 if file_ext in ['.csv', '.tsv', '.txt']:
                     self.csv_options_widget.show()
-                    if file_ext == '.tsv':
-                        self.delimiter_edit.setText('\t')
+                    
+                    # Auto-detect delimiter for CSV/TSV/TXT files
+                    main_app = self.parent()
+                    while main_app and not hasattr(main_app, 'detect_csv_delimiter'):
+                        main_app = main_app.parent()
+                    
+                    if main_app and hasattr(main_app, 'detect_csv_delimiter'):
+                        detected_delimiter = main_app.detect_csv_delimiter(file_path)
+                        # Convert tab to visible representation
+                        if detected_delimiter == '\t':
+                            self.delimiter_edit.setText('\\t')
+                        else:
+                            self.delimiter_edit.setText(detected_delimiter)
+                    elif file_ext == '.tsv':
+                        self.delimiter_edit.setText('\\t')
                 else:
                     self.csv_options_widget.hide()
             
@@ -1289,8 +1473,8 @@ class FolderImportDialog(QDialog):
         self.connection_info = connection_info
         self.setWindowTitle("Import Folder")
         self.setModal(True)
-        self.resize(850, 1000)
-        self.setMinimumSize(600, 500)  # More flexible minimum size
+        self.resize(950, 1100)  # Made even larger
+        self.setMinimumSize(800, 900)  # Set larger minimum size
         
         # Add window flags to allow maximize, minimize, and close buttons
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
@@ -1462,10 +1646,34 @@ class FolderImportDialog(QDialog):
         self.csv_options_widget = QWidget()
         csv_options_layout = QFormLayout(self.csv_options_widget)
         
+        delimiter_layout = QHBoxLayout()
         self.delimiter_edit = QLineEdit()
         self.delimiter_edit.setText(",")
         self.delimiter_edit.setPlaceholderText("e.g., , or ; or |")
-        csv_options_layout.addRow("Delimiter:", self.delimiter_edit)
+        self.delimiter_edit.setMaximumWidth(80)
+        
+        self.auto_detect_folder_button = QPushButton("🔍 Auto")
+        self.auto_detect_folder_button.setMaximumWidth(60)
+        self.auto_detect_folder_button.setToolTip("Auto-detect delimiter from CSV files in folder")
+        self.auto_detect_folder_button.clicked.connect(self.auto_detect_folder_delimiter)
+        self.auto_detect_folder_button.setStyleSheet("""
+            QPushButton {
+                background-color: #17a2b8;
+                color: white;
+                border: none;
+                padding: 4px 8px;
+                border-radius: 3px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #138496; }
+        """)
+        
+        delimiter_layout.addWidget(self.delimiter_edit)
+        delimiter_layout.addWidget(self.auto_detect_folder_button)
+        delimiter_layout.addStretch()
+        
+        csv_options_layout.addRow("Delimiter:", delimiter_layout)
         
         self.encoding_combo = QComboBox()
         self.encoding_combo.addItems(["utf-8", "latin-1", "cp1252", "utf-16"])
@@ -1593,6 +1801,68 @@ class FolderImportDialog(QDialog):
         
         # Load existing tables
         self.load_existing_tables()
+    
+    def auto_detect_folder_delimiter(self):
+        """Auto-detect delimiter from CSV files in the selected folder"""
+        if not self.found_files:
+            QMessageBox.warning(self, "No Files", "Please select a folder and scan for files first.")
+            return
+        
+        # Find CSV/TSV/TXT files in the found files
+        csv_files = [f for f in self.found_files if f.lower().endswith(('.csv', '.txt', '.tsv'))]
+        
+        if not csv_files:
+            QMessageBox.information(self, "No CSV Files", "No CSV, TSV, or TXT files found in the selected folder.")
+            return
+        
+        # Get the main app instance to use its detect_csv_delimiter method
+        main_app = self.parent()
+        while main_app and not hasattr(main_app, 'detect_csv_delimiter'):
+            main_app = main_app.parent()
+        
+        if not main_app or not hasattr(main_app, 'detect_csv_delimiter'):
+            QMessageBox.warning(self, "Error", "Could not access delimiter detection functionality.")
+            return
+        
+        # Try to detect delimiter from the first few CSV files
+        delimiter_counts = {}
+        files_checked = 0
+        
+        for file_path in csv_files[:5]:  # Check first 5 CSV files
+            try:
+                detected_delimiter = main_app.detect_csv_delimiter(file_path)
+                delimiter_counts[detected_delimiter] = delimiter_counts.get(detected_delimiter, 0) + 1
+                files_checked += 1
+            except Exception as e:
+                print(f"Error detecting delimiter for {file_path}: {e}")
+                continue
+        
+        if not delimiter_counts:
+            QMessageBox.warning(self, "Detection Failed", "Could not detect delimiter from any CSV files.")
+            return
+        
+        # Choose the most common delimiter
+        best_delimiter = max(delimiter_counts, key=delimiter_counts.get)
+        
+        # Convert tab to visible representation
+        if best_delimiter == '\t':
+            display_delimiter = '\\t'
+        else:
+            display_delimiter = best_delimiter
+        
+        self.delimiter_edit.setText(display_delimiter)
+        
+        # Show confirmation
+        delimiter_name = {
+            ',': 'comma',
+            ';': 'semicolon', 
+            '\t': 'tab',
+            '|': 'pipe'
+        }.get(best_delimiter, f"'{best_delimiter}'")
+        
+        QMessageBox.information(self, "Delimiter Detected", 
+                              f"Detected delimiter: {delimiter_name} ({display_delimiter})\n"
+                              f"Based on {files_checked} CSV file(s)")
     
     def on_excel_mode_changed(self):
         """Show/hide the default sheet name input based on Excel mode selection"""
@@ -3384,7 +3654,7 @@ class SQLEditorApp(QMainWindow):
                     return  # User cancelled or didn't provide a name
             
             # For append and replace modes, table name is already selected from dropdown
-            self.import_data(import_info)
+            self.start_import_worker(import_info, is_folder=False)
     
     def show_folder_import_dialog(self):
         if not self.current_connection:
@@ -3413,10 +3683,57 @@ class SQLEditorApp(QMainWindow):
                         return  # User cancelled or didn't provide a name
                 
                 # Import the folder
-                self.import_folder_data(folder_import_info)
+                self.start_import_worker(folder_import_info, is_folder=True)
             
         except Exception as e:
             QMessageBox.critical(self, "Dialog Error", f"Error opening folder import dialog:\n{str(e)}")
+    
+    def start_import_worker(self, import_info, is_folder=False):
+        """Start the import worker thread with progress dialog"""
+        # Create and show progress dialog
+        title = "Importing Folder..." if is_folder else "Importing File..."
+        self.progress_dialog = ProgressDialog(self, title)
+        
+        # Create and start worker thread
+        self.import_worker = ImportWorker(self, import_info, is_folder)
+        
+        # Connect worker signals
+        self.import_worker.progress.connect(self.progress_dialog.update_progress)
+        self.import_worker.finished.connect(self.on_import_finished)
+        self.import_worker.error.connect(self.on_import_error)
+        
+        # Connect progress dialog cancel to worker termination
+        self.progress_dialog.rejected.connect(self.cancel_import)
+        
+        # Start the worker and show progress dialog
+        self.import_worker.start()
+        self.progress_dialog.exec()
+    
+    def on_import_finished(self, success, message):
+        """Handle import completion"""
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.accept()
+        
+        if success:
+            QMessageBox.information(self, "Import Successful", message)
+            self.refresh_schema_browser()
+            self.check_schema_changes()
+        else:
+            QMessageBox.warning(self, "Import Failed", message)
+    
+    def on_import_error(self, error_message):
+        """Handle import error"""
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.reject()
+        
+        QMessageBox.critical(self, "Import Error", f"An error occurred during import:\n{error_message}")
+    
+    def cancel_import(self):
+        """Cancel the running import"""
+        if hasattr(self, 'import_worker') and self.import_worker.isRunning():
+            self.import_worker.terminate()
+            self.import_worker.wait()
+            QMessageBox.information(self, "Import Cancelled", "Import operation was cancelled.")
     
     def show_table_name_dialog(self, suggested_name, file_path, mode='create'):
         """Show a custom dialog for table name input with better visibility"""
@@ -4239,6 +4556,42 @@ class SQLEditorApp(QMainWindow):
             except:
                 # Ultimate fallback: return empty dataframe with at least one column
                 return pd.DataFrame({'data': ['No data could be imported']})
+    
+    def detect_csv_delimiter(self, file_path, sample_size=1024):
+        """Automatically detect the delimiter used in a CSV file"""
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
+                sample = file.read(sample_size)
+                
+            # Use csv.Sniffer to detect delimiter
+            if csv:
+                sniffer = csv.Sniffer()
+                try:
+                    dialect = sniffer.sniff(sample, delimiters=',;\t|')
+                    detected_delimiter = dialect.delimiter
+                    print(f"Auto-detected delimiter: '{detected_delimiter}' for file: {os.path.basename(file_path)}")
+                    return detected_delimiter
+                except:
+                    pass
+            
+            # Fallback: count common delimiters and choose the most frequent
+            delimiters = {',': 0, ';': 0, '\t': 0, '|': 0}
+            for delimiter in delimiters:
+                delimiters[delimiter] = sample.count(delimiter)
+            
+            # Choose the delimiter with the highest count (but at least 1)
+            best_delimiter = max(delimiters, key=delimiters.get)
+            if delimiters[best_delimiter] > 0:
+                print(f"Fallback delimiter detection: '{best_delimiter}' for file: {os.path.basename(file_path)}")
+                return best_delimiter
+            
+            # Default to comma if no delimiter found
+            print(f"No delimiter detected, defaulting to comma for file: {os.path.basename(file_path)}")
+            return ','
+            
+        except Exception as e:
+            print(f"Error detecting delimiter for {file_path}: {e}")
+            return ','
     
     def safe_string_convert(self, value):
         """Safely convert any value to a database-compatible string"""
