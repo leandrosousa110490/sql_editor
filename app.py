@@ -39,7 +39,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QFileDialog, QMessageBox, QDialog, QLineEdit,
     QFormLayout, QDialogButtonBox, QToolBar, QStatusBar, QMenu, QInputDialog,
     QSizePolicy, QFrame, QToolButton, QGroupBox, QRadioButton, QCheckBox, QListWidget,
-    QCompleter, QListWidgetItem, QProgressDialog, QGridLayout, QScrollArea
+    QCompleter, QListWidgetItem, QProgressDialog, QGridLayout, QScrollArea, QProgressBar
 )
 from PyQt6.QtGui import (
     QAction, QFont, QColor, QSyntaxHighlighter, QTextCharFormat, QIcon,
@@ -4647,26 +4647,40 @@ class SQLEditorApp(QMainWindow):
         try:
             folder_path = folder_import_info['folder_path']
             table_name = folder_import_info['table_name']
-            file_type = folder_import_info['file_type']
             mode = folder_import_info['mode']
+            
+            # Determine file type from the found files
+            file_paths = folder_import_info.get('file_paths', [])
+            if not file_paths:
+                if worker:
+                    worker.error.emit("No files found in the selected folder.")
+                return False
+            
+            # Get file type from the first file
+            first_file = file_paths[0]
+            file_ext = os.path.splitext(first_file)[1].lower()
+            
+            # Map extension to file type name (keep as extension format)
+            if file_ext == '.csv':
+                file_type = '.csv'
+            elif file_ext in ['.xlsx', '.xls']:
+                file_type = file_ext  # Keep the actual extension
+            elif file_ext == '.json':
+                file_type = '.json'
+            elif file_ext == '.parquet':
+                file_type = '.parquet'
+            elif file_ext == '.tsv':
+                file_type = '.tsv'
+            elif file_ext == '.txt':
+                file_type = '.txt'
+            else:
+                file_type = '.csv'  # Default fallback
             
             if worker:
                 worker.progress.emit(5, "Scanning folder for files...")
             
-            # Get all files to import
-            files_to_import = []
-            if file_type.lower() == 'csv':
-                files_to_import = [f for f in os.listdir(folder_path) 
-                                 if f.lower().endswith('.csv')]
-            elif file_type.lower() == 'excel':
-                files_to_import = [f for f in os.listdir(folder_path) 
-                                 if f.lower().endswith(('.xlsx', '.xls'))]
-            
-            if not files_to_import:
-                if worker:
-                    worker.error.emit(f"No {file_type} files found in the selected folder.")
-                return False
-            
+            # Use the files already found by the dialog
+            files_to_import = [os.path.basename(f) for f in file_paths]
             total_files = len(files_to_import)
             if worker:
                 worker.progress.emit(10, f"Found {total_files} files to import...")
@@ -4688,7 +4702,9 @@ class SQLEditorApp(QMainWindow):
             total_rows_imported = 0
             table_created = False
             
-            # Process files with optimized approach
+            # Process files with optimized approach for folder import
+            all_dataframes = []
+            
             for i, filename in enumerate(files_to_import):
                 if worker and worker.cancelled:
                     return False
@@ -4696,9 +4712,9 @@ class SQLEditorApp(QMainWindow):
                 file_path = os.path.join(folder_path, filename)
                 
                 # Calculate progress
-                file_progress = int(10 + (i / total_files) * 80)
+                file_progress = int(10 + (i / total_files) * 70)
                 if worker:
-                    worker.progress.emit(file_progress, f"Processing file {i+1}/{total_files}: {filename}")
+                    worker.progress.emit(file_progress, f"Loading file {i+1}/{total_files}: {filename}")
                 
                 # Create import info for this file
                 file_import_info = {
@@ -4706,40 +4722,73 @@ class SQLEditorApp(QMainWindow):
                     'table_name': safe_table_name,
                     'file_type': file_type,
                     'mode': 'append' if table_created else mode,
-                    'delimiter': folder_import_info.get('delimiter', ','),
-                    'encoding': folder_import_info.get('encoding', 'utf-8'),
-                    'has_header': folder_import_info.get('has_header', True)
+                    'delimiter': folder_import_info.get('csv_delimiter', ','),
+                    'encoding': folder_import_info.get('csv_encoding', 'utf-8'),
+                    'header': folder_import_info.get('csv_header', True)
                 }
                 
-                # Import this file using optimized method
-                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                # Load the file data
+                try:
+                    print(f"About to load file: {filename} with type: {file_type}")
+                    df = self.safe_load_data_optimized(file_path, file_type, file_import_info)
+                    
+                    if df is None:
+                        print(f"Failed to load file (returned None): {filename}")
+                        continue
+                    elif df.empty:
+                        print(f"File loaded but is empty: {filename}")
+                        continue
+                    else:
+                        print(f"Successfully loaded file: {filename} with {len(df)} rows and {len(df.columns)} columns")
+                    
+                    # Quick process the dataframe
+                    df = self.quick_process_dataframe(df)
+                    
+                    # Add filename column if requested
+                    if folder_import_info.get('add_filename_column', True):
+                        df['_source_file'] = filename
+                    
+                    all_dataframes.append(df)
+                    print(f"Loaded {len(df)} rows from {filename}")
+                    
+                except Exception as e:
+                    print(f"Failed to load file {filename}: {e}")
+                    if worker:
+                        worker.error.emit(f"Failed to load file {filename}: {str(e)}")
+                    continue
+            
+            if not all_dataframes:
+                if worker:
+                    worker.error.emit("No data could be loaded from any files.")
+                return False
+            
+            if worker:
+                worker.progress.emit(80, "Combining all files...")
+            
+            # Combine all dataframes with column alignment
+            try:
+                combined_df = self.combine_dataframes_with_alignment(all_dataframes)
+                print(f"Combined dataframes: {len(combined_df)} total rows, {len(combined_df.columns)} columns")
                 
-                if file_size_mb > 50:
-                    # Use chunked processing for large files
-                    success = self.import_large_file_chunked(file_import_info, None)  # No worker to avoid nested progress
-                else:
-                    # Use fast processing for smaller files
-                    success = self.import_small_file_fast(file_import_info, None)
+                if worker:
+                    worker.progress.emit(90, f"Inserting {len(combined_df):,} rows into database...")
+                
+                # Insert the combined data
+                success = self.fast_database_insert(combined_df, safe_table_name, mode, worker)
                 
                 if not success:
-                    print(f"Failed to import file: {filename}")
+                    print("Failed to insert combined data")
                     if worker:
-                        worker.error.emit(f"Failed to import file: {filename}")
+                        worker.error.emit("Failed to insert combined data into database")
                     return False
                 
-                table_created = True
+                total_rows_imported = len(combined_df)
                 
-                # Get row count for this file (approximate)
-                try:
-                    if file_type.lower() == 'csv':
-                        with open(file_path, 'r', encoding=file_import_info.get('encoding', 'utf-8')) as f:
-                            row_count = sum(1 for _ in f) - (1 if file_import_info.get('has_header', True) else 0)
-                    else:
-                        # For Excel, we'll estimate
-                        row_count = 1000  # Rough estimate
-                    total_rows_imported += row_count
-                except:
-                    total_rows_imported += 1000  # Fallback estimate
+            except Exception as e:
+                print(f"Failed to combine or insert data: {e}")
+                if worker:
+                    worker.error.emit(f"Failed to combine or insert data: {str(e)}")
+                return False
             
             if worker:
                 worker.progress.emit(95, "Finalizing folder import...")
@@ -4943,8 +4992,8 @@ class SQLEditorApp(QMainWindow):
     def safe_load_data_optimized(self, file_path, file_type, import_info):
         """Optimized data loading with performance enhancements"""
         try:
-            if file_type == '.csv':
-                # Optimized CSV loading
+            if file_type == '.csv' or file_type == '.txt':
+                # Optimized CSV/TXT loading
                 return pd.read_csv(
                     file_path,
                     delimiter=import_info.get('delimiter', ','),
@@ -4957,32 +5006,118 @@ class SQLEditorApp(QMainWindow):
                     na_filter=False  # Don't convert to NaN, keep as strings
                 )
             
-            elif file_type in ['.xlsx', '.xls']:
-                # Optimized Excel loading
-                return pd.read_excel(
+            elif file_type == '.tsv':
+                # TSV loading
+                return pd.read_csv(
                     file_path,
-                    sheet_name=import_info.get('sheet_name', 0),
+                    delimiter='\t',
+                    encoding=import_info.get('encoding', 'utf-8'),
+                    header=0 if import_info.get('header', True) else None,
+                    on_bad_lines='skip',
+                    low_memory=False,
                     dtype=str,
-                    na_filter=False,
-                    engine='openpyxl' if file_type == '.xlsx' else 'xlrd'
+                    engine='c',
+                    na_filter=False
                 )
             
+            elif file_type in ['.xlsx', '.xls']:
+                # Enhanced Excel loading with better error handling
+                print(f"Attempting to load Excel file: {file_path} (type: {file_type})")
+                try:
+                    # Try with specified sheet first
+                    sheet_name = import_info.get('sheet_name', 0)
+                    print(f"Trying to load sheet: {sheet_name}")
+                    df = pd.read_excel(
+                        file_path,
+                        sheet_name=sheet_name,
+                        dtype=str,
+                        na_filter=False,
+                        engine='openpyxl' if file_type == '.xlsx' else None
+                    )
+                    print(f"Successfully loaded Excel file {os.path.basename(file_path)} with {len(df)} rows and {len(df.columns)} columns")
+                    if len(df) == 0:
+                        print(f"WARNING: Excel file {os.path.basename(file_path)} has 0 rows")
+                    return df
+                except Exception as e:
+                    print(f"Failed to load Excel with sheet {sheet_name}, trying first sheet: {e}")
+                    # Fallback to first sheet
+                    try:
+                        print("Trying to load first sheet (index 0)")
+                        df = pd.read_excel(
+                            file_path,
+                            sheet_name=0,
+                            dtype=str,
+                            na_filter=False,
+                            engine='openpyxl' if file_type == '.xlsx' else None
+                        )
+                        print(f"Successfully loaded Excel file {os.path.basename(file_path)} (first sheet) with {len(df)} rows and {len(df.columns)} columns")
+                        if len(df) == 0:
+                            print(f"WARNING: Excel file {os.path.basename(file_path)} first sheet has 0 rows")
+                        return df
+                    except Exception as e2:
+                        print(f"Failed to load Excel file {file_path}: {e2}")
+                        # Try without specifying engine
+                        try:
+                            print("Trying to load Excel without specifying engine")
+                            df = pd.read_excel(file_path, sheet_name=0, dtype=str, na_filter=False)
+                            print(f"Successfully loaded Excel file {os.path.basename(file_path)} (no engine) with {len(df)} rows and {len(df.columns)} columns")
+                            if len(df) == 0:
+                                print(f"WARNING: Excel file {os.path.basename(file_path)} (no engine) has 0 rows")
+                            return df
+                        except Exception as e3:
+                            print(f"All Excel loading methods failed for {file_path}: {e3}")
+                            return None
+            
             elif file_type == '.parquet':
-                # Parquet is already optimized
-                df = pd.read_parquet(file_path)
-                return df.astype(str)
+                # Parquet loading
+                try:
+                    df = pd.read_parquet(file_path)
+                    df = df.astype(str)
+                    print(f"Successfully loaded Parquet file {os.path.basename(file_path)} with {len(df)} rows")
+                    return df
+                except Exception as e:
+                    print(f"Failed to load Parquet file {file_path}: {e}")
+                    return None
             
             elif file_type == '.json':
-                # Optimized JSON loading
-                df = pd.read_json(file_path, lines=True if file_path.endswith('.jsonl') else False)
-                return df.astype(str)
+                # JSON loading with multiple strategies
+                try:
+                    # Try pandas read_json first
+                    if file_path.endswith('.jsonl'):
+                        df = pd.read_json(file_path, lines=True)
+                    else:
+                        df = pd.read_json(file_path)
+                    df = df.astype(str)
+                    print(f"Successfully loaded JSON file {os.path.basename(file_path)} with {len(df)} rows")
+                    return df
+                except Exception as e:
+                    print(f"Pandas JSON load failed, trying manual parsing: {e}")
+                    # Fallback to manual JSON parsing
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            import json
+                            data = json.load(f)
+                            if isinstance(data, list):
+                                df = pd.DataFrame(data)
+                            elif isinstance(data, dict):
+                                df = pd.DataFrame([data])
+                            else:
+                                print(f"Unsupported JSON structure in {file_path}")
+                                return None
+                            df = df.astype(str)
+                            print(f"Successfully loaded JSON file {os.path.basename(file_path)} (manual) with {len(df)} rows")
+                            return df
+                    except Exception as e2:
+                        print(f"Failed to load JSON file {file_path}: {e2}")
+                        return None
             
             else:
                 # Fallback to regular loading
+                print(f"Using fallback loading for file type {file_type}")
                 return self.safe_load_data(file_path, file_type, import_info)
                 
         except Exception as e:
-            print(f"Optimized loading failed, falling back to safe loading: {e}")
+            print(f"Optimized loading failed for {file_path}, falling back to safe loading: {e}")
             return self.safe_load_data(file_path, file_type, import_info)
     
     def read_file_chunks(self, file_path, file_type, import_info, chunk_size):
@@ -5149,6 +5284,70 @@ class SQLEditorApp(QMainWindow):
             print(f"Fast SQLite insert failed: {e}")
             # Fallback to regular method
             return self.safe_import_to_database(df, table_name, mode)
+    
+    def combine_dataframes_with_alignment(self, dataframes):
+        """Combine multiple dataframes with proper column alignment for folder imports"""
+        if not dataframes:
+            return pd.DataFrame()
+        
+        if len(dataframes) == 1:
+            return dataframes[0]
+        
+        try:
+            # Get all unique column names across all dataframes
+            all_columns = set()
+            for df in dataframes:
+                all_columns.update(df.columns)
+            
+            all_columns = sorted(list(all_columns))
+            print(f"Found {len(all_columns)} unique columns across all files: {all_columns}")
+            
+            # Align all dataframes to have the same columns
+            aligned_dataframes = []
+            for i, df in enumerate(dataframes):
+                # Create a new dataframe with all columns
+                aligned_df = pd.DataFrame(index=df.index)
+                
+                # Copy existing columns
+                for col in df.columns:
+                    aligned_df[col] = df[col]
+                
+                # Add missing columns with None values
+                for col in all_columns:
+                    if col not in aligned_df.columns:
+                        aligned_df[col] = None
+                
+                # Reorder columns to match the standard order
+                aligned_df = aligned_df[all_columns]
+                aligned_dataframes.append(aligned_df)
+                print(f"Aligned dataframe {i+1}: {len(aligned_df)} rows, {len(aligned_df.columns)} columns")
+            
+            # Combine all aligned dataframes
+            combined_df = pd.concat(aligned_dataframes, ignore_index=True, sort=False)
+            
+            # Convert all data to strings for database compatibility
+            for col in combined_df.columns:
+                combined_df[col] = combined_df[col].astype(str)
+                # Replace 'None' strings with actual None
+                combined_df[col] = combined_df[col].replace('None', None)
+            
+            print(f"Successfully combined {len(dataframes)} dataframes into {len(combined_df)} rows")
+            return combined_df
+            
+        except Exception as e:
+            print(f"Error combining dataframes: {e}")
+            # Fallback: try simple concatenation
+            try:
+                combined_df = pd.concat(dataframes, ignore_index=True, sort=False)
+                # Fill missing values
+                combined_df = combined_df.fillna('')
+                # Convert to strings
+                for col in combined_df.columns:
+                    combined_df[col] = combined_df[col].astype(str)
+                return combined_df
+            except Exception as e2:
+                print(f"Fallback concatenation also failed: {e2}")
+                raise e
     
     def sanitize_dataframe(self, df):
         """Sanitize dataframe to prevent any import errors by converting problematic data to text"""
