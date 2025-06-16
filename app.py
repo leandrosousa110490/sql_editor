@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QComboBox, QFileDialog, QMessageBox, QDialog, QLineEdit,
     QFormLayout, QDialogButtonBox, QToolBar, QStatusBar, QMenu, QInputDialog,
     QSizePolicy, QFrame, QToolButton, QGroupBox, QRadioButton, QCheckBox, QListWidget,
-    QCompleter, QListWidgetItem
+    QCompleter, QListWidgetItem, QProgressDialog, QGridLayout, QScrollArea
 )
 from PyQt6.QtGui import (
     QAction, QFont, QColor, QSyntaxHighlighter, QTextCharFormat, QIcon,
@@ -1270,6 +1270,589 @@ class DataImportDialog(QDialog):
         return import_info
 
 
+class FolderImportDialog(QDialog):
+    """Dialog for importing multiple files from a folder"""
+    
+    def __init__(self, parent=None, connection=None, connection_info=None):
+        super().__init__(parent)
+        self.connection = connection
+        self.connection_info = connection_info
+        self.setWindowTitle("Import Folder")
+        self.setModal(True)
+        self.resize(850, 1000)
+        self.setMinimumSize(600, 500)  # More flexible minimum size
+        
+        # Add window flags to allow maximize, minimize, and close buttons
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
+        
+
+        self.found_files = []
+        self.init_ui()
+    
+    def init_ui(self):
+        # Create main layout for the dialog
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        
+        # Create scroll area
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        
+        # Create content widget for the scroll area
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
+        layout.setSpacing(15)
+        layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Title
+        title_label = QLabel("📁 Import All Files from Folder")
+        title_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #0078d4; margin-bottom: 10px;")
+        layout.addWidget(title_label)
+        
+        # Folder selection
+        folder_group = QGroupBox("Select Folder")
+        folder_layout = QVBoxLayout(folder_group)
+        
+        folder_path_layout = QHBoxLayout()
+        self.folder_path_edit = QLineEdit()
+        self.folder_path_edit.setPlaceholderText("Select a folder containing data files...")
+        self.folder_path_edit.setReadOnly(True)
+        
+        self.browse_folder_button = QPushButton("📁 Browse Folder")
+        self.browse_folder_button.clicked.connect(self.browse_folder)
+        self.browse_folder_button.setStyleSheet("""
+            QPushButton {
+                background-color: #0078d4;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #106ebe; }
+        """)
+        
+        folder_path_layout.addWidget(self.folder_path_edit)
+        folder_path_layout.addWidget(self.browse_folder_button)
+        folder_layout.addLayout(folder_path_layout)
+        
+        # Folder info
+        self.folder_info_label = QLabel("No folder selected")
+        self.folder_info_label.setStyleSheet("color: #666; font-style: italic;")
+        folder_layout.addWidget(self.folder_info_label)
+        
+        layout.addWidget(folder_group)
+        
+        # File type filter
+        filter_group = QGroupBox("File Type Filter")
+        filter_layout = QVBoxLayout(filter_group)
+        
+        # Checkboxes for file types
+        self.file_type_checkboxes = {}
+        file_types = [
+            ("csv", "CSV Files (*.csv)", False),
+            ("xlsx", "Excel Files (*.xlsx, *.xls)", False),
+            ("json", "JSON Files (*.json)", False),
+            ("parquet", "Parquet Files (*.parquet)", False),
+            ("tsv", "TSV Files (*.tsv)", False),
+            ("txt", "Text Files (*.txt)", False)
+        ]
+        
+        checkbox_layout = QGridLayout()
+        for i, (ext, label, checked) in enumerate(file_types):
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(checked)
+            checkbox.stateChanged.connect(self.update_file_scan)
+            self.file_type_checkboxes[ext] = checkbox
+            checkbox_layout.addWidget(checkbox, i // 2, i % 2)
+        
+        filter_layout.addLayout(checkbox_layout)
+        layout.addWidget(filter_group)
+        
+        # Found files display
+        files_group = QGroupBox("Found Files")
+        files_layout = QVBoxLayout(files_group)
+        
+        self.files_list = QListWidget()
+        self.files_list.setMaximumHeight(100)
+        files_layout.addWidget(self.files_list)
+        
+        self.files_info_label = QLabel("No files found")
+        self.files_info_label.setStyleSheet("color: #666; font-style: italic;")
+        files_layout.addWidget(self.files_info_label)
+        
+        layout.addWidget(files_group)
+        
+        # Import options
+        options_group = QGroupBox("Import Options")
+        options_layout = QVBoxLayout(options_group)
+        
+        # Table name input
+        table_name_layout = QHBoxLayout()
+        table_name_layout.addWidget(QLabel("Table Name:"))
+        self.table_name_edit = QLineEdit()
+        self.table_name_edit.setPlaceholderText("Enter table name for combined data...")
+        table_name_layout.addWidget(self.table_name_edit)
+        options_layout.addLayout(table_name_layout)
+        
+        # Import mode
+        mode_label = QLabel("Import Mode:")
+        mode_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        options_layout.addWidget(mode_label)
+        
+        self.create_new_radio = QRadioButton("🆕 Create new table")
+        self.create_new_radio.setChecked(True)
+        self.create_new_radio.setToolTip("Create a new table with combined data from all files")
+        
+        self.append_radio = QRadioButton("➕ Append to existing table")
+        self.append_radio.setToolTip("Add combined data to existing table")
+        
+        self.replace_radio = QRadioButton("🔄 Replace existing table")
+        self.replace_radio.setToolTip("Replace existing table with combined data")
+        
+        options_layout.addWidget(self.create_new_radio)
+        options_layout.addWidget(self.append_radio)
+        options_layout.addWidget(self.replace_radio)
+        
+        # Table selection dropdown (for append/replace modes)
+        self.table_select_widget = QWidget()
+        table_select_layout = QHBoxLayout(self.table_select_widget)
+        table_select_layout.setContentsMargins(0, 5, 0, 0)
+        table_select_layout.addWidget(QLabel("Select Table:"))
+        self.table_select_combo = QComboBox()
+        table_select_layout.addWidget(self.table_select_combo)
+        self.table_select_widget.hide()  # Initially hidden
+        options_layout.addWidget(self.table_select_widget)
+        
+        # Advanced options
+        advanced_label = QLabel("Advanced Options:")
+        advanced_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        options_layout.addWidget(advanced_label)
+        
+        self.add_filename_column = QCheckBox("Add filename column")
+        self.add_filename_column.setChecked(True)
+        self.add_filename_column.setToolTip("Add a column with the source filename for each row")
+        options_layout.addWidget(self.add_filename_column)
+        
+        self.recursive_scan = QCheckBox("Include subfolders")
+        self.recursive_scan.setChecked(False)
+        self.recursive_scan.setToolTip("Scan subfolders for files")
+        self.recursive_scan.stateChanged.connect(self.update_file_scan)
+        options_layout.addWidget(self.recursive_scan)
+        
+        layout.addWidget(options_group)
+        
+        # File-specific options
+        file_config_group = QGroupBox("File-Specific Options")
+        file_config_layout = QVBoxLayout(file_config_group)
+        
+        # CSV/TSV/TXT Options
+        self.csv_options_widget = QWidget()
+        csv_options_layout = QFormLayout(self.csv_options_widget)
+        
+        self.delimiter_edit = QLineEdit()
+        self.delimiter_edit.setText(",")
+        self.delimiter_edit.setPlaceholderText("e.g., , or ; or |")
+        csv_options_layout.addRow("Delimiter:", self.delimiter_edit)
+        
+        self.encoding_combo = QComboBox()
+        self.encoding_combo.addItems(["utf-8", "latin-1", "cp1252", "utf-16"])
+        csv_options_layout.addRow("Encoding:", self.encoding_combo)
+        
+        self.header_checkbox = QCheckBox("First row contains headers")
+        self.header_checkbox.setChecked(True)
+        csv_options_layout.addRow("", self.header_checkbox)
+        
+        file_config_layout.addWidget(QLabel("CSV/TSV/TXT Files:"))
+        file_config_layout.addWidget(self.csv_options_widget)
+        
+        # Excel Options
+        self.excel_options_widget = QWidget()
+        excel_options_layout = QFormLayout(self.excel_options_widget)
+        
+        self.sheet_behavior_combo = QComboBox()
+        self.sheet_behavior_combo.addItems([
+            "Import all sheets (combine)", 
+            "Import first sheet only", 
+            "Use specific sheet name for all files",
+            "Ask for each file"
+        ])
+        self.sheet_behavior_combo.setCurrentIndex(1)  # Default to first sheet
+        self.sheet_behavior_combo.currentTextChanged.connect(self.on_excel_mode_changed)
+        excel_options_layout.addRow("Sheet Handling:", self.sheet_behavior_combo)
+        
+        # Default sheet name selection (initially hidden)
+        self.sheet_name_label = QLabel("Default Sheet Name:")
+        
+        # Create a horizontal layout for the sheet selection
+        sheet_selection_widget = QWidget()
+        sheet_selection_layout = QHBoxLayout(sheet_selection_widget)
+        sheet_selection_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.sheet_name_combo = QComboBox()
+        self.sheet_name_combo.setEditable(True)  # Allow custom input
+        self.sheet_name_combo.setToolTip("Select a sheet name from the first Excel file, or type a custom name")
+        
+        self.refresh_sheets_button = QPushButton("🔄")
+        self.refresh_sheets_button.setMaximumWidth(30)
+        self.refresh_sheets_button.setToolTip("Refresh sheet list from first Excel file")
+        self.refresh_sheets_button.clicked.connect(self.refresh_excel_sheets)
+        
+        sheet_selection_layout.addWidget(self.sheet_name_combo)
+        sheet_selection_layout.addWidget(self.refresh_sheets_button)
+        
+        # Initially hide both label and input
+        self.sheet_name_label.hide()
+        sheet_selection_widget.hide()
+        self.sheet_selection_widget = sheet_selection_widget  # Store reference
+        
+        excel_options_layout.addRow(self.sheet_name_label, sheet_selection_widget)
+        
+        file_config_layout.addWidget(QLabel("Excel Files:"))
+        file_config_layout.addWidget(self.excel_options_widget)
+        
+        # JSON Options
+        self.json_options_widget = QWidget()
+        json_options_layout = QFormLayout(self.json_options_widget)
+        
+        self.json_normalize_checkbox = QCheckBox("Normalize nested JSON")
+        self.json_normalize_checkbox.setChecked(True)
+        self.json_normalize_checkbox.setToolTip("Flatten nested JSON objects into columns")
+        json_options_layout.addRow("", self.json_normalize_checkbox)
+        
+        file_config_layout.addWidget(QLabel("JSON Files:"))
+        file_config_layout.addWidget(self.json_options_widget)
+        
+        layout.addWidget(file_config_group)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        self.cancel_button = QPushButton("❌ Cancel")
+        self.cancel_button.clicked.connect(self.reject)
+        self.cancel_button.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #5a6268; }
+        """)
+        
+        self.import_button = QPushButton("📥 Import Folder")
+        self.import_button.clicked.connect(self.accept)
+        self.import_button.setEnabled(False)
+        self.import_button.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #218838; }
+            QPushButton:disabled { background-color: #6c757d; opacity: 0.6; }
+        """)
+        
+        button_layout.addWidget(self.cancel_button)
+        button_layout.addWidget(self.import_button)
+        layout.addLayout(button_layout)
+        
+        # Set the content widget to the scroll area
+        scroll_area.setWidget(content_widget)
+        
+        # Add scroll area to main layout
+        main_layout.addWidget(scroll_area)
+        
+        # Connect signals
+        self.folder_path_edit.textChanged.connect(self.update_ui)
+        self.table_name_edit.textChanged.connect(self.update_ui)
+        self.table_select_combo.currentTextChanged.connect(self.update_ui)
+        
+        # Connect radio button signals
+        self.create_new_radio.toggled.connect(self.update_table_selection_ui)
+        self.append_radio.toggled.connect(self.update_table_selection_ui)
+        self.replace_radio.toggled.connect(self.update_table_selection_ui)
+        
+        # Load existing tables
+        self.load_existing_tables()
+    
+    def on_excel_mode_changed(self):
+        """Show/hide the default sheet name input based on Excel mode selection"""
+        current_mode = self.sheet_behavior_combo.currentText()
+        
+        if "Use specific sheet name" in current_mode:
+            # Show the default sheet name selection and label
+            self.sheet_name_label.show()
+            self.sheet_selection_widget.show()
+            # Auto-refresh sheets when first shown
+            self.refresh_excel_sheets()
+        else:
+            # Hide the default sheet name selection and label
+            self.sheet_name_label.hide()
+            self.sheet_selection_widget.hide()
+    
+    def refresh_excel_sheets(self):
+        """Refresh the sheet names dropdown from the first Excel file found"""
+        try:
+            # Clear existing items
+            self.sheet_name_combo.clear()
+            
+            # Find first Excel file in the current file list
+            first_excel_file = None
+            for file_path in self.found_files:
+                if file_path.lower().endswith(('.xlsx', '.xls')):
+                    first_excel_file = file_path
+                    break
+            
+            if not first_excel_file:
+                # No Excel files found, add default options
+                self.sheet_name_combo.addItems(['Sheet1', 'Data', 'Sheet'])
+                self.sheet_name_combo.setCurrentText('Sheet1')
+                return
+            
+            # Try to read sheet names from the first Excel file
+            try:
+                import pandas as pd
+                excel_file = pd.ExcelFile(first_excel_file)
+                sheet_names = excel_file.sheet_names
+                
+                if sheet_names:
+                    self.sheet_name_combo.addItems(sheet_names)
+                    self.sheet_name_combo.setCurrentText(sheet_names[0])  # Select first sheet by default
+                    
+                    # Update tooltip with file info
+                    file_name = os.path.basename(first_excel_file)
+                    self.sheet_name_combo.setToolTip(f"Sheet names from: {file_name}\nSelect a sheet or type a custom name")
+                else:
+                    # File has no sheets, add defaults
+                    self.sheet_name_combo.addItems(['Sheet1', 'Data', 'Sheet'])
+                    self.sheet_name_combo.setCurrentText('Sheet1')
+                    
+            except Exception as e:
+                # Error reading Excel file, add default options
+                self.sheet_name_combo.addItems(['Sheet1', 'Data', 'Sheet'])
+                self.sheet_name_combo.setCurrentText('Sheet1')
+                print(f"Could not read sheets from {first_excel_file}: {e}")
+                
+        except Exception as e:
+            # General error, add default options
+            self.sheet_name_combo.addItems(['Sheet1', 'Data', 'Sheet'])
+            self.sheet_name_combo.setCurrentText('Sheet1')
+            print(f"Error refreshing Excel sheets: {e}")
+    
+    def browse_folder(self):
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder Containing Data Files",
+            "",
+            QFileDialog.Option.ShowDirsOnly
+        )
+        
+        if folder_path:
+            self.folder_path_edit.setText(folder_path)
+            self.analyze_folder(folder_path)
+    
+    def analyze_folder(self, folder_path):
+        try:
+            # Auto-suggest table name only if field is empty
+            if not self.table_name_edit.text().strip():
+                folder_name = os.path.basename(folder_path)
+                # Clean table name (remove special characters, replace with underscores)
+                clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', folder_name).lower()
+                if clean_name:
+                    self.table_name_edit.setText(clean_name)
+                else:
+                    self.table_name_edit.setText("folder_import")
+            
+            self.update_file_scan()
+            
+        except Exception as e:
+            self.folder_info_label.setText(f"Error analyzing folder: {str(e)}")
+    
+    def update_file_scan(self):
+        folder_path = self.folder_path_edit.text()
+        if not folder_path or not os.path.exists(folder_path):
+            self.found_files = []
+            self.files_list.clear()
+            self.folder_info_label.setText("No folder selected")
+            self.files_info_label.setText("No files found")
+            return
+        
+        try:
+            # Get selected file types
+            selected_extensions = []
+            for ext, checkbox in self.file_type_checkboxes.items():
+                if checkbox.isChecked():
+                    if ext == "xlsx":
+                        selected_extensions.extend([".xlsx", ".xls"])
+                    else:
+                        selected_extensions.append(f".{ext}")
+            
+            # Auto-update delimiter for TSV files
+            if self.file_type_checkboxes.get("tsv", QCheckBox()).isChecked():
+                if self.delimiter_edit.text() in [",", ""]:
+                    self.delimiter_edit.setText("\\t")
+            
+            # Scan folder for files
+            self.found_files = []
+            if self.recursive_scan.isChecked():
+                # Recursive scan
+                for root, dirs, files in os.walk(folder_path):
+                    for file in files:
+                        if any(file.lower().endswith(ext) for ext in selected_extensions):
+                            self.found_files.append(os.path.join(root, file))
+            else:
+                # Non-recursive scan
+                for file in os.listdir(folder_path):
+                    file_path = os.path.join(folder_path, file)
+                    if os.path.isfile(file_path) and any(file.lower().endswith(ext) for ext in selected_extensions):
+                        self.found_files.append(file_path)
+            
+            # Update UI
+            self.files_list.clear()
+            total_size = 0
+            for file_path in self.found_files:
+                try:
+                    file_size = os.path.getsize(file_path)
+                    total_size += file_size
+                    file_info = f"{os.path.basename(file_path)} ({file_size / 1024 / 1024:.2f} MB)"
+                    self.files_list.addItem(file_info)
+                except:
+                    self.files_list.addItem(os.path.basename(file_path))
+            
+            # Update info labels
+            if self.found_files:
+                self.folder_info_label.setText(f"Folder: {os.path.basename(folder_path)} | Found {len(self.found_files)} files | Total size: {total_size / 1024 / 1024:.2f} MB")
+                self.files_info_label.setText(f"{len(self.found_files)} files found")
+                
+                # Auto-refresh Excel sheets if the specific sheet option is selected
+                if "Use specific sheet name" in self.sheet_behavior_combo.currentText():
+                    self.refresh_excel_sheets()
+            else:
+                self.folder_info_label.setText(f"Folder: {os.path.basename(folder_path)} | No supported files found")
+                self.files_info_label.setText("No files found with selected file types")
+            
+        except Exception as e:
+            self.folder_info_label.setText(f"Error scanning folder: {str(e)}")
+            self.files_info_label.setText("Error scanning files")
+    
+    def load_existing_tables(self):
+        """Load existing tables from the database into the dropdown"""
+        self.table_select_combo.clear()
+        
+        if not self.connection or not self.connection_info:
+            return
+            
+        try:
+            if self.connection_info['type'].lower() == 'duckdb':
+                tables_df = self.connection.execute("SHOW TABLES").fetchdf()
+                existing_tables = tables_df['name'].tolist() if not tables_df.empty else []
+            else:  # SQLite
+                cursor = self.connection.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                existing_tables = [row[0] for row in cursor.fetchall()]
+            
+            if existing_tables:
+                for table in existing_tables:
+                    self.table_select_combo.addItem(f"📊 {table}")
+            else:
+                self.table_select_combo.addItem("(No tables found)")
+                self.table_select_combo.setEnabled(False)
+                
+        except Exception as e:
+            self.table_select_combo.addItem(f"Error loading tables: {str(e)}")
+            self.table_select_combo.setEnabled(False)
+    
+    def update_table_selection_ui(self):
+        """Update the table selection UI based on the selected import mode"""
+        if self.create_new_radio.isChecked():
+            self.table_select_widget.hide()
+        else:  # append or replace mode
+            self.table_select_widget.show()
+        self.update_ui()
+    
+    def update_ui(self):
+        # Enable import button only if folder, files, and appropriate table selection are provided
+        has_folder = bool(self.folder_path_edit.text().strip())
+        has_files = len(self.found_files) > 0
+        
+        # Check if any file types are selected
+        has_file_types = any(checkbox.isChecked() for checkbox in self.file_type_checkboxes.values())
+        
+        if self.create_new_radio.isChecked():
+            has_table_info = bool(self.table_name_edit.text().strip())
+        else:  # append or replace mode
+            current_text = self.table_select_combo.currentText()
+            has_table_info = (current_text and 
+                            current_text != "(No tables found)" and
+                            not current_text.startswith("Error") and
+                            current_text.startswith("📊 "))
+        
+        # Check if Excel files are selected and if default sheet name is required
+        has_excel_files = self.file_type_checkboxes.get("xlsx", QCheckBox()).isChecked()
+        excel_sheet_behavior = self.sheet_behavior_combo.currentText()
+        needs_sheet_name = has_excel_files and "Use specific sheet name" in excel_sheet_behavior
+        has_sheet_name = bool(self.sheet_name_combo.currentText().strip()) if needs_sheet_name else True
+        
+        # Update button state and tooltip
+        can_import = has_folder and has_files and has_table_info and has_file_types and has_sheet_name
+        self.import_button.setEnabled(can_import)
+        
+        # Update button tooltip with helpful information
+        if not has_folder:
+            self.import_button.setToolTip("Please select a folder first")
+        elif not has_file_types:
+            self.import_button.setToolTip("Please select at least one file type to import")
+        elif not has_files:
+            self.import_button.setToolTip("No files found with selected types in the folder")
+        elif not has_table_info:
+            if self.create_new_radio.isChecked():
+                self.import_button.setToolTip("Please enter a table name")
+            else:
+                self.import_button.setToolTip("Please select an existing table")
+        elif not has_sheet_name:
+            self.import_button.setToolTip("Please enter a default sheet name for Excel files")
+        else:
+            self.import_button.setToolTip(f"Ready to import {len(self.found_files)} files")
+    
+    def get_import_info(self):
+        # Get table name based on mode
+        if self.create_new_radio.isChecked():
+            table_name = self.table_name_edit.text().strip()
+        else:  # append or replace mode
+            table_name = self.table_select_combo.currentText()
+            # Remove icon prefix if present
+            if table_name.startswith("📊 "):
+                table_name = table_name[2:]  # Remove "📊 " prefix
+        
+        import_info = {
+            'folder_path': self.folder_path_edit.text(),
+            'file_paths': self.found_files.copy(),
+            'table_name': table_name,
+            'mode': 'create' if self.create_new_radio.isChecked() else 
+                   'append' if self.append_radio.isChecked() else 'replace',
+            'add_filename_column': self.add_filename_column.isChecked(),
+            'recursive_scan': self.recursive_scan.isChecked(),
+            # File-specific options
+            'csv_delimiter': self.delimiter_edit.text() or ',',
+            'csv_encoding': self.encoding_combo.currentText(),
+            'csv_header': self.header_checkbox.isChecked(),
+            'excel_sheet_behavior': self.sheet_behavior_combo.currentText(),
+            'excel_default_sheet': self.sheet_name_combo.currentText().strip(),
+            'json_normalize': self.json_normalize_checkbox.isChecked()
+        }
+        
+        return import_info
+
+
 # Tab widget for query editors
 class QueryTab(QWidget):
     schema_changed = pyqtSignal()  # Signal to notify when schema might have changed
@@ -1281,6 +1864,11 @@ class QueryTab(QWidget):
         self.query_worker = None
         self.table_names = []
         self.column_names = []
+        
+        # Fullscreen state
+        self.is_fullscreen = False
+        self.normal_geometry = None
+        self.main_window = None
         
         # Layout
         self.layout = QVBoxLayout(self)
@@ -1309,6 +1897,39 @@ class QueryTab(QWidget):
         self.results_layout = QVBoxLayout(self.results_widget)
         self.results_layout.setContentsMargins(0, 0, 0, 0)
         
+        # Editor header with fullscreen button
+        self.editor_header = QWidget()
+        self.editor_header_layout = QHBoxLayout(self.editor_header)
+        self.editor_header_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.editor_label = QLabel("Query Editor")
+        self.editor_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        
+        self.fullscreen_button = QPushButton("⛶")
+        self.fullscreen_button.setMaximumSize(30, 25)
+        self.fullscreen_button.setToolTip("Toggle fullscreen editor (F11)")
+        self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
+        self.fullscreen_button.setStyleSheet("""
+            QPushButton {
+                background-color: #404040;
+                color: #ffffff;
+                border: 1px solid #606060;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #505050;
+                border-color: #0078d4;
+            }
+            QPushButton:pressed {
+                background-color: #0078d4;
+            }
+        """)
+        
+        self.editor_header_layout.addWidget(self.editor_label)
+        self.editor_header_layout.addStretch()
+        self.editor_header_layout.addWidget(self.fullscreen_button)
+        
         # Results header
         self.results_header = QWidget()
         self.results_header_layout = QHBoxLayout(self.results_header)
@@ -1336,11 +1957,18 @@ class QueryTab(QWidget):
         table_palette.setColor(QPalette.ColorRole.Text, ColorScheme.TEXT)
         self.results_table.setPalette(table_palette)
         
+        # Create editor container with header
+        self.editor_container = QWidget()
+        self.editor_container_layout = QVBoxLayout(self.editor_container)
+        self.editor_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.editor_container_layout.addWidget(self.editor_header)
+        self.editor_container_layout.addWidget(self.editor)
+        
         # Add widgets to layouts
         self.results_layout.addWidget(self.results_header)
         self.results_layout.addWidget(self.results_table)
         
-        self.splitter.addWidget(self.editor)
+        self.splitter.addWidget(self.editor_container)
         self.splitter.addWidget(self.results_widget)
         self.splitter.setSizes([200, 300])
         
@@ -1350,14 +1978,25 @@ class QueryTab(QWidget):
         if not self.connection:
             QMessageBox.warning(self, "No Connection", "Please connect to a database first.")
             return
+        
+        # Check if there's a selection first
+        cursor = self.editor.textCursor()
+        if cursor.hasSelection():
+            query = cursor.selectedText().strip()
+            execution_type = "selection"
+        else:
+            query = self.editor.toPlainText().strip()
+            execution_type = "full query"
             
-        query = self.editor.toPlainText().strip()
         if not query:
             return
             
+        # Show what's being executed
+        query_preview = query[:100] + "..." if len(query) > 100 else query
+        self.results_info.setText(f"Executing {execution_type}: {query_preview}")
+        
         # Disable editor during execution
         self.editor.setReadOnly(True)
-        self.results_info.setText("Executing query...")
         
         # Execute query in a separate thread
         self.query_worker = QueryWorker(self.connection, query)
@@ -1400,6 +2039,128 @@ class QueryTab(QWidget):
             
         # Update the editor's completer
         self.editor.update_completions(self.table_names, self.column_names)
+    
+    def toggle_fullscreen(self):
+        """Toggle fullscreen mode for the query editor"""
+        if not self.is_fullscreen:
+            # Enter fullscreen mode
+            self.enter_fullscreen()
+        else:
+            # Exit fullscreen mode
+            self.exit_fullscreen()
+    
+    def enter_fullscreen(self):
+        """Enter fullscreen mode"""
+        try:
+            # Find the main window
+            self.main_window = self.window()
+            
+            # Create fullscreen window
+            self.fullscreen_window = QWidget()
+            self.fullscreen_window.setWindowTitle("SQL Editor - Fullscreen")
+            self.fullscreen_window.setWindowFlags(Qt.WindowType.Window)
+            
+            # Set up fullscreen layout
+            fullscreen_layout = QVBoxLayout(self.fullscreen_window)
+            fullscreen_layout.setContentsMargins(10, 10, 10, 10)
+            
+            # Create fullscreen header
+            header_widget = QWidget()
+            header_layout = QHBoxLayout(header_widget)
+            header_layout.setContentsMargins(0, 0, 0, 10)
+            
+            title_label = QLabel("SQL Editor - Fullscreen Mode")
+            title_label.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+            title_label.setStyleSheet(f"color: {ColorScheme.TEXT.name()};")
+            
+            exit_button = QPushButton("✕ Exit Fullscreen")
+            exit_button.clicked.connect(self.exit_fullscreen)
+            exit_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #d32f2f;
+                    color: white;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #b71c1c; }
+            """)
+            
+            header_layout.addWidget(title_label)
+            header_layout.addStretch()
+            header_layout.addWidget(exit_button)
+            
+            # Move editor to fullscreen window
+            self.editor.setParent(None)
+            
+            fullscreen_layout.addWidget(header_widget)
+            fullscreen_layout.addWidget(self.editor)
+            
+            # Set dark theme for fullscreen window
+            self.fullscreen_window.setStyleSheet(f"""
+                QWidget {{
+                    background-color: {ColorScheme.BACKGROUND.name()};
+                    color: {ColorScheme.TEXT.name()};
+                }}
+            """)
+            
+            # Show fullscreen
+            self.fullscreen_window.showFullScreen()
+            self.editor.setFocus()
+            
+            # Update state
+            self.is_fullscreen = True
+            self.fullscreen_button.setText("⛶")
+            self.fullscreen_button.setToolTip("Exit fullscreen editor (F11 or Esc)")
+            
+            # Install event filter for escape key
+            self.fullscreen_window.installEventFilter(self)
+            
+        except Exception as e:
+            print(f"Error entering fullscreen: {e}")
+    
+    def exit_fullscreen(self):
+        """Exit fullscreen mode"""
+        try:
+            if hasattr(self, 'fullscreen_window') and self.fullscreen_window:
+                # Move editor back to original container
+                self.editor.setParent(None)
+                self.editor_container_layout.addWidget(self.editor)
+                
+                # Close fullscreen window
+                self.fullscreen_window.close()
+                self.fullscreen_window = None
+                
+                # Update state
+                self.is_fullscreen = False
+                self.fullscreen_button.setText("⛶")
+                self.fullscreen_button.setToolTip("Toggle fullscreen editor (F11)")
+                
+                # Focus back to editor
+                self.editor.setFocus()
+                
+        except Exception as e:
+            print(f"Error exiting fullscreen: {e}")
+    
+    def eventFilter(self, obj, event):
+        """Handle events for fullscreen mode"""
+        if (obj == self.fullscreen_window and 
+            event.type() == event.Type.KeyPress):
+            if event.key() == Qt.Key.Key_Escape:
+                self.exit_fullscreen()
+                return True
+            elif event.key() == Qt.Key.Key_F11:
+                self.exit_fullscreen()
+                return True
+        return super().eventFilter(obj, event)
+    
+    def keyPressEvent(self, event):
+        """Handle key press events"""
+        if event.key() == Qt.Key.Key_F11:
+            self.toggle_fullscreen()
+        else:
+            super().keyPressEvent(event)
 
 # Database schema browser
 class SchemaBrowser(QTreeWidget):
@@ -2137,8 +2898,18 @@ class SQLEditorApp(QMainWindow):
         self.execute_button.setIcon(qta.icon('fa5s.play', color=ColorScheme.SUCCESS))
         self.execute_button.setText("Execute")
         self.execute_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.execute_button.setToolTip("Execute entire query (F5)")
         self.execute_button.clicked.connect(self.execute_current_query)
         self.toolbar.addWidget(self.execute_button)
+        
+        # Execute Selection button
+        self.execute_selection_button = QToolButton()
+        self.execute_selection_button.setIcon(qta.icon('fa5s.play-circle', color=ColorScheme.ACCENT))
+        self.execute_selection_button.setText("Execute Selection")
+        self.execute_selection_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.execute_selection_button.setToolTip("Execute selected text only (Ctrl+E)")
+        self.execute_selection_button.clicked.connect(self.execute_selected_query)
+        self.toolbar.addWidget(self.execute_selection_button)
         
         # New tab button
         self.new_tab_button = QToolButton()
@@ -2176,6 +2947,15 @@ class SQLEditorApp(QMainWindow):
         self.import_data_button.setToolTip("Import data from CSV, Excel, Parquet, JSON files")
         self.import_data_button.clicked.connect(self.show_import_dialog)
         self.toolbar.addWidget(self.import_data_button)
+        
+        # Folder Import button
+        self.folder_import_button = QToolButton()
+        self.folder_import_button.setIcon(qta.icon('fa5s.folder', color=ColorScheme.ACCENT))
+        self.folder_import_button.setText("Import Folder")
+        self.folder_import_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.folder_import_button.setToolTip("Import and combine all files from a folder")
+        self.folder_import_button.clicked.connect(self.show_folder_import_dialog)
+        self.toolbar.addWidget(self.folder_import_button)
     
     def create_actions(self):
         # File actions
@@ -2215,10 +2995,18 @@ class SQLEditorApp(QMainWindow):
         self.import_data_action.setShortcut("Ctrl+I")
         self.import_data_action.triggered.connect(self.show_import_dialog)
         
+        self.folder_import_action = QAction(qta.icon('fa5s.folder', color=ColorScheme.ACCENT), "Import &Folder...", self)
+        self.folder_import_action.setShortcut("Ctrl+Shift+I")
+        self.folder_import_action.triggered.connect(self.show_folder_import_dialog)
+        
         # Query actions
         self.execute_action = QAction(qta.icon('fa5s.play', color=ColorScheme.SUCCESS), "&Execute Query", self)
         self.execute_action.setShortcut("F5")
         self.execute_action.triggered.connect(self.execute_current_query)
+        
+        self.execute_selection_action = QAction(qta.icon('fa5s.play-circle', color=ColorScheme.ACCENT), "Execute &Selection", self)
+        self.execute_selection_action.setShortcut("Ctrl+E")
+        self.execute_selection_action.triggered.connect(self.execute_selected_query)
         
         # Create keyboard shortcut for executing query with Ctrl+Enter
         self.execute_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
@@ -2250,10 +3038,12 @@ class SQLEditorApp(QMainWindow):
         self.db_menu.addAction(self.disconnect_action)
         self.db_menu.addSeparator()
         self.db_menu.addAction(self.import_data_action)
+        self.db_menu.addAction(self.folder_import_action)
         
         # Query menu
         self.query_menu = self.menuBar().addMenu("&Query")
         self.query_menu.addAction(self.execute_action)
+        self.query_menu.addAction(self.execute_selection_action)
     
     def add_tab(self):
         # Create new query tab
@@ -2305,6 +3095,38 @@ class SQLEditorApp(QMainWindow):
             
             # For append and replace modes, table name is already selected from dropdown
             self.import_data(import_info)
+    
+    def show_folder_import_dialog(self):
+        if not self.current_connection:
+            QMessageBox.warning(self, "No Connection", "Please connect to a database first.")
+            return
+        
+        try:
+            dialog = FolderImportDialog(self, self.current_connection, self.current_connection_info)
+            result = dialog.exec()
+            
+            if result == QDialog.DialogCode.Accepted:
+                folder_import_info = dialog.get_import_info()
+                
+                # Validate that we have the required information
+                if not folder_import_info or not folder_import_info.get('file_paths'):
+                    QMessageBox.warning(self, "Import Error", "No files selected for import.")
+                    return
+                
+                # For create mode, still ask for table name confirmation
+                if folder_import_info['mode'] == 'create':
+                    suggested_name = folder_import_info['table_name'] or "folder_import"
+                    table_name = self.show_table_name_dialog(suggested_name, folder_import_info['folder_path'], 'create')
+                    if table_name:
+                        folder_import_info['table_name'] = table_name
+                    else:
+                        return  # User cancelled or didn't provide a name
+                
+                # Import the folder
+                self.import_folder_data(folder_import_info)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Dialog Error", f"Error opening folder import dialog:\n{str(e)}")
     
     def show_table_name_dialog(self, suggested_name, file_path, mode='create'):
         """Show a custom dialog for table name input with better visibility"""
@@ -2564,8 +3386,36 @@ class SQLEditorApp(QMainWindow):
             original_rows, original_cols = df.shape
             self.statusBar().showMessage(f"Processing {original_rows:,} rows × {original_cols} columns...")
             
+            # Handle duplicate columns
+            df = self.handle_duplicate_columns(df)
+            
             # Clean column names for database compatibility
             df.columns = [self.clean_column_name(col) for col in df.columns]
+            
+            # Ensure unique table name
+            safe_table_name = self.ensure_unique_table_name(table_name, mode)
+            
+            # Validate data before import
+            errors, warnings = self.validate_import_data(df, safe_table_name, mode)
+            
+            # Show validation results if any
+            if errors:
+                error_msg = "Cannot proceed with import:\n\n" + "\n".join(f"• {error}" for error in errors)
+                QMessageBox.critical(self, "Import Validation Failed", error_msg)
+                return
+            
+            if warnings:
+                warning_msg = "Import warnings:\n\n" + "\n".join(f"• {warning}" for warning in warnings)
+                warning_msg += "\n\nDo you want to continue with the import?"
+                
+                reply = QMessageBox.question(
+                    self, "Import Warnings", warning_msg,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                )
+                
+                if reply == QMessageBox.StandardButton.No:
+                    return
             
             # Sanitize all data to prevent import errors
             df = self.sanitize_dataframe(df)
@@ -2575,15 +3425,15 @@ class SQLEditorApp(QMainWindow):
                 # Drop table if exists
                 try:
                     if self.current_connection_info['type'].lower() == 'duckdb':
-                        self.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+                        self.current_connection.execute(f"DROP TABLE IF EXISTS {safe_table_name}")
                     else:  # SQLite
-                        self.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+                        self.current_connection.execute(f"DROP TABLE IF EXISTS {safe_table_name}")
                         self.current_connection.commit()
                 except:
                     pass  # Table might not exist
             
             # Import data to database with bulletproof error handling
-            success = self.safe_import_to_database(df, table_name, mode)
+            success = self.safe_import_to_database(df, safe_table_name, mode)
             
             if success:
                 # Update schema browser immediately
@@ -2597,21 +3447,23 @@ class SQLEditorApp(QMainWindow):
                     'replace': 'replaced'
                 }[mode]
                 
-                QMessageBox.information(
-                    self, 
-                    "Import Successful", 
-                    f"Successfully {mode_text} table '{table_name}'!\n\n"
-                    f"📊 {rows:,} rows × {cols} columns imported\n"
-                    f"📁 Source: {os.path.basename(file_path)}\n\n"
-                    f"✅ All data was automatically converted to compatible formats"
-                )
+                # Show success message with any name changes
+                success_msg = f"Successfully {mode_text} table '{safe_table_name}'!\n\n"
+                success_msg += f"📊 {rows:,} rows × {cols} columns imported\n"
+                success_msg += f"📁 Source: {os.path.basename(file_path)}\n\n"
+                success_msg += f"✅ All data was automatically converted to compatible formats"
                 
-                self.statusBar().showMessage(f"Import completed: {rows:,} rows imported to '{table_name}'", 5000)
+                if safe_table_name != table_name:
+                    success_msg += f"\n\n⚠️ Table name was changed from '{table_name}' to '{safe_table_name}' to ensure uniqueness."
+                
+                QMessageBox.information(self, "Import Successful", success_msg)
+                
+                self.statusBar().showMessage(f"Import completed: {rows:,} rows imported to '{safe_table_name}'", 5000)
                 
                 # Add a query to the current tab to show the imported data
                 current_tab = self.tab_widget.currentWidget()
                 if current_tab and not current_tab.editor.toPlainText().strip():
-                    current_tab.editor.setPlainText(f"SELECT * FROM {table_name} LIMIT 100;")
+                    current_tab.editor.setPlainText(f"SELECT * FROM {safe_table_name} LIMIT 100;")
             else:
                 QMessageBox.warning(self, "Import Warning", "Import completed but some issues were encountered. Data was converted to text format for compatibility.")
             
@@ -2636,6 +3488,290 @@ class SQLEditorApp(QMainWindow):
             
             QMessageBox.critical(self, "Import Error", user_msg)
             self.statusBar().showMessage(f"Import failed: {error_msg}", 5000)
+    
+    def import_folder_data(self, folder_import_info):
+        """Import data from multiple files in a folder with column mismatch handling"""
+        try:
+            file_paths = folder_import_info['file_paths']
+            table_name = folder_import_info['table_name']
+            mode = folder_import_info['mode']
+            add_filename_column = folder_import_info['add_filename_column']
+            
+            if not file_paths:
+                QMessageBox.warning(self, "No Files", "No supported files found in the selected folder.")
+                return
+            
+            # Show progress dialog
+            progress_dialog = QProgressDialog("Processing files...", "Cancel", 0, len(file_paths), self)
+            progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.show()
+            
+            # Process each file and collect dataframes
+            all_dataframes = []
+            all_columns = set()
+            successful_files = []
+            failed_files = []
+            
+            self.statusBar().showMessage(f"Processing {len(file_paths)} files...")
+            
+            for i, file_path in enumerate(file_paths):
+                if progress_dialog.wasCanceled():
+                    self.statusBar().showMessage("Import cancelled by user", 3000)
+                    return
+                
+                progress_dialog.setLabelText(f"Processing {os.path.basename(file_path)}...")
+                progress_dialog.setValue(i)
+                QApplication.processEvents()  # Allow UI to update
+                
+                try:
+                    # Determine file type and create import info
+                    file_ext = os.path.splitext(file_path)[1].lower()
+                    
+                    # Create file-specific import info
+                    file_import_info = {
+                        'file_type': file_ext,
+                        'encoding': folder_import_info.get('csv_encoding', 'utf-8'),
+                        'delimiter': self.get_delimiter_for_file(file_ext, folder_import_info),
+                        'header': folder_import_info.get('csv_header', True)
+                    }
+                    
+                    # Handle Excel files specially
+                    if file_ext in ['.xlsx', '.xls']:
+                        sheet_behavior = folder_import_info.get('excel_sheet_behavior', 'Import first sheet only')
+                        if sheet_behavior == 'Import all sheets (combine)':
+                            df = self.load_excel_all_sheets(file_path)
+                        elif sheet_behavior == 'Ask for each file':
+                            df = self.load_excel_with_dialog(file_path)
+                        elif 'Use specific sheet name' in sheet_behavior:
+                            # Use the default sheet name specified by user
+                            default_sheet = folder_import_info.get('excel_default_sheet', '')
+                            if default_sheet:
+                                file_import_info['sheet_name'] = default_sheet
+                            else:
+                                file_import_info['sheet_name'] = 0  # Fallback to first sheet
+                            df = self.safe_load_data(file_path, file_ext, file_import_info)
+                        else:  # Import first sheet only
+                            file_import_info['sheet_name'] = 0
+                            df = self.safe_load_data(file_path, file_ext, file_import_info)
+                    else:
+                        # Load file using existing safe_load_data method
+                        df = self.safe_load_data(file_path, file_ext, file_import_info)
+                    
+                    if df is not None and not df.empty:
+                        # Handle duplicate columns first
+                        df = self.handle_duplicate_columns(df)
+                        
+                        # Clean column names
+                        df.columns = [self.clean_column_name(col) for col in df.columns]
+                        
+                        # Add filename column if requested (after cleaning column names)
+                        if add_filename_column:
+                            # Ensure the source file column name is unique
+                            source_col_name = '_source_file'
+                            counter = 1
+                            while source_col_name in df.columns:
+                                source_col_name = f'_source_file_{counter}'
+                                counter += 1
+                            df[source_col_name] = os.path.basename(file_path)
+                        
+                        # Sanitize the dataframe
+                        df = self.sanitize_dataframe(df)
+                        
+                        # Track all columns across files
+                        all_columns.update(df.columns)
+                        
+                        all_dataframes.append(df)
+                        successful_files.append(file_path)
+                    else:
+                        failed_files.append(f"{os.path.basename(file_path)}: No data found")
+                        
+                except Exception as e:
+                    failed_files.append(f"{os.path.basename(file_path)}: {str(e)}")
+                    continue
+            
+            progress_dialog.setValue(len(file_paths))
+            
+            if not all_dataframes:
+                QMessageBox.warning(self, "Import Failed", "No data could be loaded from any of the files.")
+                return
+            
+            # Create unified dataframe with all columns
+            self.statusBar().showMessage("Combining data from all files...")
+            
+            # Ensure all dataframes have the same columns (fill missing with None)
+            all_columns = sorted(list(all_columns))
+            
+            for df in all_dataframes:
+                for col in all_columns:
+                    if col not in df.columns:
+                        df[col] = None
+                # Reorder columns to match
+                df = df[all_columns]
+            
+            # Concatenate all dataframes
+            combined_df = pd.concat(all_dataframes, ignore_index=True, sort=False)
+            
+            # Ensure unique table name
+            safe_table_name = self.ensure_unique_table_name(table_name, mode)
+            
+            # Validate combined data before import
+            errors, warnings = self.validate_import_data(combined_df, safe_table_name, mode)
+            
+            # Show validation results if any
+            if errors:
+                error_msg = "Cannot proceed with folder import:\n\n" + "\n".join(f"• {error}" for error in errors)
+                QMessageBox.critical(self, "Folder Import Validation Failed", error_msg)
+                return
+            
+            if warnings:
+                warning_msg = "Folder import warnings:\n\n" + "\n".join(f"• {warning}" for warning in warnings)
+                warning_msg += "\n\nDo you want to continue with the import?"
+                
+                reply = QMessageBox.question(
+                    self, "Folder Import Warnings", warning_msg,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                )
+                
+                if reply == QMessageBox.StandardButton.No:
+                    return
+            
+            # Handle import mode
+            if mode == 'replace':
+                # Drop table if exists
+                try:
+                    if self.current_connection_info['type'].lower() == 'duckdb':
+                        self.current_connection.execute(f"DROP TABLE IF EXISTS {safe_table_name}")
+                    else:  # SQLite
+                        self.current_connection.execute(f"DROP TABLE IF EXISTS {safe_table_name}")
+                        self.current_connection.commit()
+                except:
+                    pass  # Table might not exist
+            
+            # Import combined data to database
+            success = self.safe_import_to_database(combined_df, safe_table_name, mode)
+            
+            # Show results
+            if success:
+                # Create summary message
+                total_rows = len(combined_df)
+                total_cols = len(combined_df.columns)
+                
+                summary_parts = [
+                    f"✅ Successfully imported {total_rows:,} rows × {total_cols} columns",
+                    f"📊 Table: {safe_table_name}",
+                    f"📁 From {len(successful_files)} files"
+                ]
+                
+                if failed_files:
+                    summary_parts.append(f"⚠️  {len(failed_files)} files failed")
+                
+                summary_msg = "\n".join(summary_parts)
+                
+                # Show table name change if it occurred
+                if safe_table_name != table_name:
+                    summary_msg += f"\n\n⚠️ Table name was changed from '{table_name}' to '{safe_table_name}' to ensure uniqueness."
+                
+                if failed_files:
+                    failed_details = "\n".join(failed_files[:5])  # Show first 5 failures
+                    if len(failed_files) > 5:
+                        failed_details += f"\n... and {len(failed_files) - 5} more"
+                    
+                    summary_msg += f"\n\nFailed files:\n{failed_details}"
+                
+                QMessageBox.information(self, "Folder Import Complete", summary_msg)
+                self.statusBar().showMessage(f"Folder import complete: {total_rows:,} rows imported", 5000)
+                
+                # Refresh schema browser to show new/updated table
+                self.refresh_schema_browser()
+            else:
+                QMessageBox.critical(self, "Import Failed", "Failed to import the combined data to database.")
+                self.statusBar().showMessage("Folder import failed", 5000)
+                
+        except Exception as e:
+            error_msg = str(e)
+            QMessageBox.critical(self, "Folder Import Error", f"Failed to import folder:\n{error_msg}")
+            self.statusBar().showMessage(f"Folder import failed: {error_msg}", 5000)
+    
+    def get_delimiter_for_file(self, file_ext, folder_import_info):
+        """Get the appropriate delimiter for the file type"""
+        delimiter = folder_import_info.get('csv_delimiter', ',')
+        
+        # Handle special delimiter representations
+        if delimiter == '\\t':
+            delimiter = '\t'
+        elif delimiter == '\\n':
+            delimiter = '\n'
+        elif delimiter == '\\r':
+            delimiter = '\r'
+        
+        if file_ext == '.csv':
+            return delimiter
+        elif file_ext == '.tsv':
+            return '\t'  # Always tab for TSV
+        elif file_ext == '.txt':
+            return delimiter
+        else:
+            return delimiter
+    
+    def load_excel_all_sheets(self, file_path):
+        """Load all sheets from an Excel file and combine them"""
+        try:
+            excel_file = pd.ExcelFile(file_path)
+            all_sheets = []
+            
+            for sheet_name in excel_file.sheet_names:
+                try:
+                    sheet_df = pd.read_excel(file_path, sheet_name=sheet_name, dtype=str)
+                    if not sheet_df.empty:
+                        # Add sheet name column
+                        sheet_df['_sheet_name'] = sheet_name
+                        all_sheets.append(sheet_df)
+                except Exception as e:
+                    print(f"Failed to read sheet '{sheet_name}': {e}")
+                    continue
+            
+            if all_sheets:
+                # Combine all sheets
+                combined_df = pd.concat(all_sheets, ignore_index=True, sort=False)
+                return combined_df
+            else:
+                return None
+                
+        except Exception as e:
+            print(f"Failed to load Excel file '{file_path}': {e}")
+            return None
+    
+    def load_excel_with_dialog(self, file_path):
+        """Load Excel file with user sheet selection"""
+        try:
+            excel_file = pd.ExcelFile(file_path)
+            sheet_names = excel_file.sheet_names
+            
+            if len(sheet_names) == 1:
+                # Only one sheet, just load it
+                return pd.read_excel(file_path, sheet_name=0, dtype=str)
+            
+            # Multiple sheets - ask user to select
+            sheet_name, ok = QInputDialog.getItem(
+                self, 
+                f"Select Sheet - {os.path.basename(file_path)}", 
+                "Choose which sheet to import:",
+                sheet_names, 
+                0, 
+                False
+            )
+            
+            if ok and sheet_name:
+                return pd.read_excel(file_path, sheet_name=sheet_name, dtype=str)
+            else:
+                # User cancelled - skip this file
+                return None
+                
+        except Exception as e:
+            print(f"Failed to load Excel file '{file_path}': {e}")
+            return None
     
     def safe_load_data(self, file_path, file_type, import_info):
         """Safely load data from any file type with robust error handling"""
@@ -2963,6 +4099,109 @@ class SQLEditorApp(QMainWindow):
             print(f"Safe import completely failed: {e}")
             return False
     
+    def duckdb_safe_import(self, df, table_name, mode):
+        """DuckDB-specific import method to handle transactions properly"""
+        try:
+            # For DuckDB, avoid pandas to_sql which can cause transaction issues
+            # Instead, create table manually and use INSERT statements
+            
+            if mode == 'replace':
+                try:
+                    self.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+                except:
+                    pass
+            
+            # Create table with all TEXT columns for safety
+            columns_sql = ", ".join([f'"{col}" TEXT' for col in df.columns])
+            
+            if mode in ['create', 'replace']:
+                create_sql = f"CREATE TABLE {table_name} ({columns_sql})"
+                self.current_connection.execute(create_sql)
+            
+            # Insert data using DuckDB's efficient INSERT
+            placeholders = ", ".join(["?" for _ in df.columns])
+            insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
+            
+            # Convert all data to strings to avoid type issues
+            data_rows = []
+            for _, row in df.iterrows():
+                converted_row = [self.safe_string_convert(val) for val in row.values]
+                data_rows.append(converted_row)
+            
+            # Batch insert for efficiency
+            batch_size = 1000
+            for i in range(0, len(data_rows), batch_size):
+                batch = data_rows[i:i + batch_size]
+                try:
+                    self.current_connection.executemany(insert_sql, batch)
+                except Exception as batch_error:
+                    print(f"Batch insert failed, trying row by row: {batch_error}")
+                    # Fall back to individual inserts for this batch
+                    for row in batch:
+                        try:
+                            self.current_connection.execute(insert_sql, row)
+                        except Exception as row_error:
+                            print(f"Skipped problematic row: {row_error}")
+                            continue
+            
+            print(f"DuckDB import successful: {len(df)} rows")
+            return True
+            
+        except Exception as e:
+            print(f"DuckDB import failed: {e}")
+            return self.row_by_row_insert_fallback(df, table_name, mode)
+    
+    def row_by_row_insert_fallback(self, df, table_name, mode):
+        """Final fallback method for problematic imports"""
+        try:
+            db_type = self.current_connection_info['type'].lower()
+            
+            # Drop and recreate table for replace mode
+            if mode == 'replace':
+                try:
+                    self.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+                    if db_type == 'sqlite':
+                        self.current_connection.commit()
+                except:
+                    pass
+            
+            # Create table with all TEXT columns
+            columns_sql = ", ".join([f'"{col}" TEXT' for col in df.columns])
+            create_sql = f"CREATE TABLE IF NOT EXISTS {table_name} ({columns_sql})"
+            self.current_connection.execute(create_sql)
+            
+            if db_type == 'sqlite':
+                self.current_connection.commit()
+            
+            # Insert rows one by one with error handling
+            successful_rows = 0
+            placeholders = ", ".join(["?" for _ in df.columns])
+            insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
+            
+            for idx, row in df.iterrows():
+                try:
+                    values = [self.safe_string_convert(val) for val in row.values]
+                    self.current_connection.execute(insert_sql, values)
+                    successful_rows += 1
+                    
+                    # Commit periodically for SQLite
+                    if successful_rows % 500 == 0 and db_type == 'sqlite':
+                        self.current_connection.commit()
+                        
+                except Exception as row_error:
+                    print(f"Skipped row {idx}: {row_error}")
+                    continue
+            
+            if db_type == 'sqlite':
+                self.current_connection.commit()
+            
+            print(f"Fallback import completed: {successful_rows}/{len(df)} rows inserted")
+            return successful_rows > 0
+            
+        except Exception as e:
+            print(f"Fallback import failed: {e}")
+            return False
+    
     def flexible_append_data(self, df, table_name, db_type):
         """Append data with flexible column handling - adds missing columns automatically and handles all errors"""
         try:
@@ -3001,8 +4240,8 @@ class SQLEditorApp(QMainWindow):
                     return
                 except Exception as e:
                     print(f"Failed to create new table: {e}")
-                    # Use safe import as fallback
-                    return self.safe_import_to_database(df, table_name, 'create')
+                    # Use row-by-row insert as fallback
+                    return self.row_by_row_insert_fallback(df, table_name, 'create')
             
             # Get new columns from the dataframe
             new_columns = set(df.columns)
@@ -3107,10 +4346,224 @@ class SQLEditorApp(QMainWindow):
         
         return clean_name
     
+    def ensure_unique_table_name(self, base_name, mode='create'):
+        """Ensure table name is unique and safe for database operations"""
+        if not base_name:
+            base_name = "imported_table"
+        
+        # Clean the base name
+        clean_base = self.clean_table_name(base_name)
+        
+        # If we're creating a new table, check for conflicts
+        if mode == 'create':
+            return self.get_unique_table_name(clean_base)
+        else:
+            # For append/replace modes, just clean the name
+            return clean_base
+    
+    def clean_table_name(self, table_name):
+        """Clean table name to be database-safe"""
+        if not table_name:
+            return "imported_table"
+        
+        # Convert to string and strip whitespace
+        clean_name = str(table_name).strip()
+        
+        # Replace problematic characters with underscores
+        clean_name = re.sub(r'[^\w\s]', '_', clean_name)
+        
+        # Replace whitespace with underscores
+        clean_name = re.sub(r'\s+', '_', clean_name)
+        
+        # Remove multiple consecutive underscores
+        clean_name = re.sub(r'_+', '_', clean_name)
+        
+        # Remove leading/trailing underscores
+        clean_name = clean_name.strip('_')
+        
+        # Ensure it doesn't start with a number
+        if clean_name and clean_name[0].isdigit():
+            clean_name = f"table_{clean_name}"
+        
+        # Ensure it's not empty and not too long
+        if not clean_name:
+            clean_name = "imported_table"
+        elif len(clean_name) > 50:  # Reasonable limit for table names
+            clean_name = clean_name[:50].rstrip('_')
+        
+        # Check against SQL reserved words
+        sql_reserved = {
+            'select', 'from', 'where', 'insert', 'update', 'delete', 'create', 'drop', 
+            'alter', 'table', 'index', 'view', 'database', 'schema', 'primary', 'key',
+            'foreign', 'references', 'constraint', 'unique', 'not', 'null', 'default',
+            'check', 'order', 'by', 'group', 'having', 'union', 'join', 'inner', 'outer',
+            'left', 'right', 'on', 'as', 'distinct', 'count', 'sum', 'avg', 'max', 'min'
+        }
+        
+        if clean_name.lower() in sql_reserved:
+            clean_name = f"tbl_{clean_name}"
+        
+        return clean_name.lower()
+    
+    def get_unique_table_name(self, base_name):
+        """Get a unique table name by checking existing tables and adding suffix if needed"""
+        if not self.current_connection or not self.current_connection_info:
+            return base_name
+        
+        try:
+            # Get existing table names
+            existing_tables = set()
+            
+            if self.current_connection_info['type'].lower() == 'duckdb':
+                tables_df = self.current_connection.execute("SHOW TABLES").fetchdf()
+                existing_tables = set(tables_df['name'].str.lower()) if not tables_df.empty else set()
+            else:  # SQLite
+                cursor = self.current_connection.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                existing_tables = {row[0].lower() for row in cursor.fetchall()}
+            
+            # If base name is unique, use it
+            if base_name.lower() not in existing_tables:
+                return base_name
+            
+            # Find unique name with suffix
+            counter = 1
+            while True:
+                candidate = f"{base_name}_{counter}"
+                if candidate.lower() not in existing_tables:
+                    return candidate
+                counter += 1
+                
+                # Safety check to prevent infinite loop
+                if counter > 1000:
+                    import time
+                    timestamp = int(time.time())
+                    return f"{base_name}_{timestamp}"
+                    
+        except Exception as e:
+            print(f"Error checking table uniqueness: {e}")
+            # Fallback to timestamp-based naming
+            import time
+            timestamp = int(time.time())
+            return f"{base_name}_{timestamp}"
+    
+    def validate_import_data(self, df, table_name, mode):
+        """Validate data before import and provide helpful error messages"""
+        errors = []
+        warnings = []
+        
+        # Check if dataframe is empty
+        if df is None or df.empty:
+            errors.append("No data to import - the file appears to be empty")
+            return errors, warnings
+        
+        # Check table name
+        if not table_name or not table_name.strip():
+            errors.append("Table name cannot be empty")
+        elif len(table_name.strip()) > 50:
+            warnings.append(f"Table name is very long ({len(table_name)} chars) - it will be truncated")
+        
+        # Check column names
+        if df.columns.empty:
+            errors.append("No columns found in the data")
+        else:
+            # Check for duplicate column names
+            column_counts = df.columns.value_counts()
+            duplicates = column_counts[column_counts > 1]
+            if not duplicates.empty:
+                warnings.append(f"Duplicate column names found: {list(duplicates.index)} - they will be renamed")
+            
+            # Check for problematic column names
+            problematic_cols = []
+            for col in df.columns:
+                if not str(col).strip():
+                    problematic_cols.append("(empty column name)")
+                elif str(col).strip().isdigit():
+                    problematic_cols.append(f"'{col}' (starts with number)")
+            
+            if problematic_cols:
+                warnings.append(f"Problematic column names will be cleaned: {problematic_cols}")
+        
+        # Check data size
+        row_count = len(df)
+        col_count = len(df.columns)
+        
+        if row_count == 0:
+            warnings.append("No data rows found (only headers)")
+        elif row_count > 1000000:
+            warnings.append(f"Large dataset ({row_count:,} rows) - import may take some time")
+        
+        if col_count > 100:
+            warnings.append(f"Many columns ({col_count}) - consider if all are needed")
+        
+        # Check for mode-specific issues
+        if mode in ['append', 'replace'] and self.current_connection:
+            try:
+                # Check if target table exists for append/replace
+                table_exists = False
+                if self.current_connection_info['type'].lower() == 'duckdb':
+                    result = self.current_connection.execute(f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{table_name}'").fetchone()
+                    table_exists = result[0] > 0 if result else False
+                else:  # SQLite
+                    cursor = self.current_connection.cursor()
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+                    table_exists = cursor.fetchone() is not None
+                
+                if not table_exists:
+                    if mode == 'append':
+                        errors.append(f"Cannot append to table '{table_name}' - table does not exist")
+                    elif mode == 'replace':
+                        warnings.append(f"Table '{table_name}' does not exist - will create new table")
+                        
+            except Exception as e:
+                warnings.append(f"Could not verify table existence: {str(e)}")
+        
+        return errors, warnings
+    
+    def handle_duplicate_columns(self, df):
+        """Handle duplicate column names by renaming them"""
+        if df is None or df.empty:
+            return df
+        
+        # Get column names and find duplicates
+        columns = list(df.columns)
+        seen = {}
+        new_columns = []
+        
+        for col in columns:
+            col_str = str(col).strip()
+            col_lower = col_str.lower()
+            
+            if col_lower in seen:
+                # This is a duplicate, add a suffix
+                seen[col_lower] += 1
+                new_col = f"{col_str}_{seen[col_lower]}"
+            else:
+                # First occurrence
+                seen[col_lower] = 0
+                new_col = col_str
+            
+            new_columns.append(new_col)
+        
+        # Update dataframe columns
+        df.columns = new_columns
+        return df
+    
     def execute_current_query(self):
         current_tab = self.tab_widget.currentWidget()
         if current_tab:
             current_tab.execute_query()
+    
+    def execute_selected_query(self):
+        """Execute only the selected text as a query"""
+        current_tab = self.tab_widget.currentWidget()
+        if current_tab:
+            cursor = current_tab.editor.textCursor()
+            if cursor.hasSelection():
+                current_tab.execute_query()  # Will automatically detect selection
+            else:
+                # If no selection, show a message
+                self.statusBar().showMessage("No text selected. Select SQL code to execute or use F5 to run the entire query.", 3000)
     
     def save_query(self):
         current_tab = self.tab_widget.currentWidget()
