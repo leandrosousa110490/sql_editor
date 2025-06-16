@@ -17,6 +17,12 @@ from datetime import datetime
 import json
 import re
 
+# Additional imports for export functionality
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTabWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QTreeWidget, QTreeWidgetItem, QTextEdit, QTableView, QHeaderView,
@@ -1939,8 +1945,38 @@ class QueryTab(QWidget):
         self.results_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
         self.results_info = QLabel("")
         
+        # Export button
+        self.export_button = QPushButton("📤 Export")
+        self.export_button.setMaximumSize(80, 25)
+        self.export_button.setToolTip("Export results to file")
+        self.export_button.setEnabled(False)  # Initially disabled
+        self.export_button.clicked.connect(self.show_export_menu)
+        self.export_button.setStyleSheet("""
+            QPushButton {
+                background-color: #0078d4;
+                color: #ffffff;
+                border: 1px solid #106ebe;
+                border-radius: 3px;
+                font-weight: bold;
+                padding: 2px 8px;
+            }
+            QPushButton:hover {
+                background-color: #106ebe;
+                border-color: #005a9e;
+            }
+            QPushButton:pressed {
+                background-color: #005a9e;
+            }
+            QPushButton:disabled {
+                background-color: #404040;
+                color: #808080;
+                border-color: #606060;
+            }
+        """)
+        
         self.results_header_layout.addWidget(self.results_label)
         self.results_header_layout.addWidget(self.results_info, 1)
+        self.results_header_layout.addWidget(self.export_button)
         
         # Results table
         self.results_table = QTableView()
@@ -2004,6 +2040,14 @@ class QueryTab(QWidget):
         self.query_worker.error.connect(self.handle_query_error)
         self.query_worker.start()
     
+    def execute_selected_query(self):
+        """Execute only the selected text as a query"""
+        cursor = self.editor.textCursor()
+        if cursor.hasSelection():
+            self.execute_query()  # Will automatically detect selection
+        else:
+            QMessageBox.information(self, "No Selection", "Please select some text in the query editor first.")
+    
     def handle_query_results(self, df, execution_time):
         # Update table model with results
         self.model = PandasTableModel(df)
@@ -2017,6 +2061,9 @@ class QueryTab(QWidget):
         row_count = len(df)
         self.results_info.setText(f"{row_count} {'row' if row_count == 1 else 'rows'} returned in {execution_time:.3f} seconds")
         
+        # Enable export button if we have results
+        self.export_button.setEnabled(row_count > 0)
+        
         # Check if this was a DDL statement that might have changed the schema
         query = self.editor.toPlainText().strip().upper()
         ddl_keywords = ['CREATE TABLE', 'DROP TABLE', 'ALTER TABLE', 'CREATE VIEW', 'DROP VIEW', 'CREATE INDEX', 'DROP INDEX']
@@ -2028,6 +2075,7 @@ class QueryTab(QWidget):
     
     def handle_query_error(self, error_message):
         self.results_info.setText(f"Error: {error_message}")
+        self.export_button.setEnabled(False)  # Disable export on error
         self.editor.setReadOnly(False)
         
     def update_schema_completions(self, table_names=None, column_names=None):
@@ -2161,6 +2209,228 @@ class QueryTab(QWidget):
             self.toggle_fullscreen()
         else:
             super().keyPressEvent(event)
+    
+    def show_export_menu(self):
+        """Show export options menu"""
+        if not hasattr(self, 'model') or not self.model or self.model.rowCount() == 0:
+            QMessageBox.information(self, "No Data", "No results to export.")
+            return
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #404040;
+                color: #ffffff;
+                border: 1px solid #606060;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 8px 16px;
+                border-radius: 3px;
+            }
+            QMenu::item:selected {
+                background-color: #0078d4;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #606060;
+                margin: 4px 8px;
+            }
+        """)
+        
+        # Add export format actions
+        csv_action = menu.addAction("📄 Export as CSV")
+        csv_action.triggered.connect(lambda: self.export_data('csv'))
+        
+        excel_action = menu.addAction("📊 Export as Excel")
+        excel_action.triggered.connect(lambda: self.export_data('excel'))
+        
+        json_action = menu.addAction("🔗 Export as JSON")
+        json_action.triggered.connect(lambda: self.export_data('json'))
+        
+        parquet_action = menu.addAction("📦 Export as Parquet")
+        parquet_action.triggered.connect(lambda: self.export_data('parquet'))
+        
+        menu.addSeparator()
+        
+        tsv_action = menu.addAction("📋 Export as TSV")
+        tsv_action.triggered.connect(lambda: self.export_data('tsv'))
+        
+        html_action = menu.addAction("🌐 Export as HTML")
+        html_action.triggered.connect(lambda: self.export_data('html'))
+        
+        xml_action = menu.addAction("📰 Export as XML")
+        xml_action.triggered.connect(lambda: self.export_data('xml'))
+        
+        menu.addSeparator()
+        
+        clipboard_action = menu.addAction("📋 Copy to Clipboard")
+        clipboard_action.triggered.connect(lambda: self.export_data('clipboard'))
+        
+        # Show menu at button position
+        button_pos = self.export_button.mapToGlobal(self.export_button.rect().bottomLeft())
+        menu.exec(button_pos)
+    
+    def export_data(self, format_type):
+        """Export results data in the specified format"""
+        try:
+            if not hasattr(self, 'model') or not self.model or self.model.rowCount() == 0:
+                QMessageBox.information(self, "No Data", "No results to export.")
+                return
+            
+            # Get the dataframe from the model
+            df = self.model._data.copy()
+            
+            if format_type == 'clipboard':
+                # Copy to clipboard
+                df.to_clipboard(index=False, sep='\t')
+                QMessageBox.information(self, "Export Successful", 
+                                      f"Results copied to clipboard!\n\n"
+                                      f"📊 {len(df):,} rows × {len(df.columns)} columns")
+                return
+            
+            # File export - get save location
+            file_filters = {
+                'csv': "CSV Files (*.csv)",
+                'excel': "Excel Files (*.xlsx)",
+                'json': "JSON Files (*.json)",
+                'parquet': "Parquet Files (*.parquet)",
+                'tsv': "TSV Files (*.tsv)",
+                'html': "HTML Files (*.html)",
+                'xml': "XML Files (*.xml)"
+            }
+            
+            file_extensions = {
+                'csv': '.csv',
+                'excel': '.xlsx',
+                'json': '.json',
+                'parquet': '.parquet',
+                'tsv': '.tsv',
+                'html': '.html',
+                'xml': '.xml'
+            }
+            
+            default_name = f"query_results{file_extensions[format_type]}"
+            
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                f"Export Results as {format_type.upper()}",
+                default_name,
+                file_filters[format_type]
+            )
+            
+            if not file_path:
+                return  # User cancelled
+            
+            # Export based on format
+            if format_type == 'csv':
+                df.to_csv(file_path, index=False, encoding='utf-8')
+                
+            elif format_type == 'excel':
+                if openpyxl is None:
+                    QMessageBox.warning(self, "Excel Export Unavailable", 
+                                      "Excel export requires the 'openpyxl' package.\n"
+                                      "Please install it with: pip install openpyxl")
+                    return
+                
+                with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+                    df.to_excel(writer, sheet_name='Query Results', index=False)
+                    
+                    # Auto-adjust column widths
+                    worksheet = writer.sheets['Query Results']
+                    for column in worksheet.columns:
+                        max_length = 0
+                        column_letter = column[0].column_letter
+                        for cell in column:
+                            try:
+                                if len(str(cell.value)) > max_length:
+                                    max_length = len(str(cell.value))
+                            except:
+                                pass
+                        adjusted_width = min(max_length + 2, 50)
+                        worksheet.column_dimensions[column_letter].width = adjusted_width
+                
+            elif format_type == 'json':
+                df.to_json(file_path, orient='records', indent=2, date_format='iso')
+                
+            elif format_type == 'parquet':
+                df.to_parquet(file_path, index=False)
+                
+            elif format_type == 'tsv':
+                df.to_csv(file_path, index=False, sep='\t', encoding='utf-8')
+                
+            elif format_type == 'html':
+                html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Query Results</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        table {{ border-collapse: collapse; width: 100%; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #f2f2f2; font-weight: bold; }}
+        tr:nth-child(even) {{ background-color: #f9f9f9; }}
+        .info {{ margin-bottom: 20px; color: #666; }}
+    </style>
+</head>
+<body>
+    <h1>Query Results</h1>
+    <div class="info">
+        <p>Exported on: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+        <p>Rows: {len(df):,} | Columns: {len(df.columns)}</p>
+    </div>
+    {df.to_html(index=False, escape=False, classes='results-table')}
+</body>
+</html>
+                """
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                
+            elif format_type == 'xml':
+                xml_content = '<?xml version="1.0" encoding="UTF-8"?>\n'
+                xml_content += '<query_results>\n'
+                xml_content += f'  <metadata>\n'
+                xml_content += f'    <export_date>{pd.Timestamp.now().isoformat()}</export_date>\n'
+                xml_content += f'    <row_count>{len(df)}</row_count>\n'
+                xml_content += f'    <column_count>{len(df.columns)}</column_count>\n'
+                xml_content += f'  </metadata>\n'
+                xml_content += '  <data>\n'
+                
+                for _, row in df.iterrows():
+                    xml_content += '    <row>\n'
+                    for col in df.columns:
+                        # Clean column name for XML
+                        clean_col = str(col).replace(' ', '_').replace('-', '_')
+                        clean_col = ''.join(c for c in clean_col if c.isalnum() or c == '_')
+                        value = str(row[col]) if pd.notna(row[col]) else ''
+                        # Escape XML special characters
+                        value = value.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                        xml_content += f'      <{clean_col}>{value}</{clean_col}>\n'
+                    xml_content += '    </row>\n'
+                
+                xml_content += '  </data>\n'
+                xml_content += '</query_results>'
+                
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.write(xml_content)
+            
+            # Show success message
+            file_size = os.path.getsize(file_path) / 1024  # Size in KB
+            size_text = f"{file_size:.1f} KB" if file_size < 1024 else f"{file_size/1024:.1f} MB"
+            
+            QMessageBox.information(self, "Export Successful", 
+                                  f"Results exported successfully!\n\n"
+                                  f"📁 File: {os.path.basename(file_path)}\n"
+                                  f"📊 Data: {len(df):,} rows × {len(df.columns)} columns\n"
+                                  f"💾 Size: {size_text}\n"
+                                  f"📍 Location: {file_path}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", 
+                               f"Failed to export results:\n\n{str(e)}")
+            print(f"Export error: {e}")
 
 # Database schema browser
 class SchemaBrowser(QTreeWidget):
@@ -2911,6 +3181,15 @@ class SQLEditorApp(QMainWindow):
         self.execute_selection_button.clicked.connect(self.execute_selected_query)
         self.toolbar.addWidget(self.execute_selection_button)
         
+        # Export Results button
+        self.export_results_button = QToolButton()
+        self.export_results_button.setIcon(qta.icon('fa5s.download', color='#2196F3'))
+        self.export_results_button.setText("Export Results")
+        self.export_results_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.export_results_button.setToolTip("Export query results (Ctrl+Shift+E)")
+        self.export_results_button.clicked.connect(self.export_current_results)
+        self.toolbar.addWidget(self.export_results_button)
+        
         # New tab button
         self.new_tab_button = QToolButton()
         self.new_tab_button.setIcon(qta.icon('fa5s.plus', color=ColorScheme.TEXT))
@@ -3008,6 +3287,11 @@ class SQLEditorApp(QMainWindow):
         self.execute_selection_action.setShortcut("Ctrl+E")
         self.execute_selection_action.triggered.connect(self.execute_selected_query)
         
+        # Export results action
+        self.export_results_action = QAction(qta.icon('fa5s.download', color='#2196F3'), "Export &Results", self)
+        self.export_results_action.setShortcut("Ctrl+Shift+E")
+        self.export_results_action.triggered.connect(self.export_current_results)
+        
         # Create keyboard shortcut for executing query with Ctrl+Enter
         self.execute_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
         self.execute_shortcut.activated.connect(self.execute_current_query)
@@ -3044,6 +3328,8 @@ class SQLEditorApp(QMainWindow):
         self.query_menu = self.menuBar().addMenu("&Query")
         self.query_menu.addAction(self.execute_action)
         self.query_menu.addAction(self.execute_selection_action)
+        self.query_menu.addSeparator()
+        self.query_menu.addAction(self.export_results_action)
     
     def add_tab(self):
         # Create new query tab
@@ -4564,6 +4850,14 @@ class SQLEditorApp(QMainWindow):
             else:
                 # If no selection, show a message
                 self.statusBar().showMessage("No text selected. Select SQL code to execute or use F5 to run the entire query.", 3000)
+    
+    def export_current_results(self):
+        """Export results from the current tab"""
+        current_tab = self.tab_widget.currentWidget()
+        if current_tab and hasattr(current_tab, 'show_export_menu'):
+            current_tab.show_export_menu()
+        else:
+            QMessageBox.information(self, "No Results", "No query results to export. Please run a query first.")
     
     def save_query(self):
         current_tab = self.tab_widget.currentWidget()
