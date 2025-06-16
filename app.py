@@ -22,15 +22,16 @@ from PyQt6.QtWidgets import (
     QSplitter, QTreeWidget, QTreeWidgetItem, QTextEdit, QTableView, QHeaderView,
     QLabel, QPushButton, QComboBox, QFileDialog, QMessageBox, QDialog, QLineEdit,
     QFormLayout, QDialogButtonBox, QToolBar, QStatusBar, QMenu, QInputDialog,
-    QSizePolicy, QFrame, QToolButton, QGroupBox, QRadioButton, QCheckBox, QListWidget
+    QSizePolicy, QFrame, QToolButton, QGroupBox, QRadioButton, QCheckBox, QListWidget,
+    QCompleter, QListWidgetItem
 )
 from PyQt6.QtGui import (
     QAction, QFont, QColor, QSyntaxHighlighter, QTextCharFormat, QIcon,
-    QTextCursor, QPalette, QKeySequence, QShortcut
+    QTextCursor, QPalette, QKeySequence, QShortcut, QStandardItemModel, QStandardItem
 )
 from PyQt6.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QSize, QThread, pyqtSignal,
-    QRegularExpression, QSettings, QTimer
+    QRegularExpression, QSettings, QTimer, QStringListModel, pyqtSlot
 )
 import qtawesome as qta
 
@@ -60,131 +61,473 @@ class ColorScheme:
     COLUMN_NAME = QColor(152, 195, 121)      # Light green for column names
     DATA_TYPE = QColor(209, 154, 102)        # Tan for data types
 
+# SQL Auto-completion and suggestions
+class SQLCompleter(QCompleter):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setup_completions()
+        self.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self.setWrapAround(False)
+        
+        # Customize the popup appearance
+        popup = self.popup()
+        popup.setStyleSheet("""
+            QListView {
+                background-color: #2d2d2d;
+                color: #f0f0f0;
+                border: 1px solid #4a4a4a;
+                selection-background-color: #3a7bd5;
+                selection-color: white;
+                outline: none;
+            }
+            QListView::item {
+                padding: 5px;
+                border-bottom: 1px solid #3a3a3a;
+            }
+            QListView::item:hover {
+                background-color: #3a3a3a;
+            }
+            QListView::item:selected {
+                background-color: #3a7bd5;
+            }
+        """)
+        
+    def setup_completions(self):
+        # SQL Keywords and commands
+        self.sql_keywords = [
+            # Core SQL commands
+            'SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP',
+            'TRUNCATE', 'BEGIN', 'COMMIT', 'ROLLBACK', 'SAVEPOINT', 'RELEASE',
+            
+            # Clauses and modifiers
+            'DISTINCT', 'ALL', 'AS', 'INTO', 'VALUES', 'SET', 'ON', 'USING',
+            'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET', 'FETCH',
+            'UNION', 'UNION ALL', 'INTERSECT', 'EXCEPT', 'MINUS',
+            
+            # Joins
+            'JOIN', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN',
+            'CROSS JOIN', 'NATURAL JOIN', 'LEFT OUTER JOIN', 'RIGHT OUTER JOIN',
+            'FULL OUTER JOIN',
+            
+            # Conditional logic
+            'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'IF', 'IFNULL', 'NULLIF',
+            
+            # Operators
+            'AND', 'OR', 'NOT', 'IN', 'NOT IN', 'LIKE', 'NOT LIKE', 'ILIKE',
+            'BETWEEN', 'NOT BETWEEN', 'EXISTS', 'NOT EXISTS', 'IS', 'IS NOT',
+            'IS NULL', 'IS NOT NULL', 'REGEXP', 'RLIKE',
+            
+            # Window functions
+            'OVER', 'PARTITION BY', 'WINDOW', 'ROWS', 'RANGE', 'PRECEDING',
+            'FOLLOWING', 'UNBOUNDED', 'CURRENT ROW',
+            
+            # CTEs and subqueries
+            'WITH', 'RECURSIVE', 'LATERAL',
+            
+            # Data types
+            'INTEGER', 'INT', 'BIGINT', 'SMALLINT', 'TINYINT', 'SERIAL',
+            'VARCHAR', 'CHAR', 'TEXT', 'STRING', 'CLOB', 'NVARCHAR', 'NCHAR',
+            'REAL', 'FLOAT', 'DOUBLE', 'NUMERIC', 'DECIMAL', 'MONEY',
+            'DATE', 'TIME', 'TIMESTAMP', 'DATETIME', 'YEAR', 'INTERVAL',
+            'BOOLEAN', 'BOOL', 'BIT', 'BLOB', 'BINARY', 'VARBINARY',
+            'JSON', 'JSONB', 'XML', 'UUID', 'ARRAY',
+            
+            # Constraints and table operations
+            'PRIMARY KEY', 'FOREIGN KEY', 'UNIQUE', 'NOT NULL', 'DEFAULT',
+            'CHECK', 'REFERENCES', 'CASCADE', 'RESTRICT', 'SET NULL', 'SET DEFAULT',
+            'AUTO_INCREMENT', 'IDENTITY', 'GENERATED', 'ALWAYS', 'BY DEFAULT',
+            
+            # Database objects
+            'TABLE', 'VIEW', 'INDEX', 'TRIGGER', 'PROCEDURE', 'FUNCTION',
+            'SCHEMA', 'DATABASE', 'CATALOG', 'SEQUENCE', 'DOMAIN', 'TYPE',
+            
+            # Permissions and security
+            'GRANT', 'REVOKE', 'DENY', 'ROLE', 'USER', 'LOGIN', 'PASSWORD',
+            'PRIVILEGES', 'USAGE', 'EXECUTE', 'REFERENCES', 'TEMPORARY',
+            
+            # Optimization and hints
+            'EXPLAIN', 'ANALYZE', 'VERBOSE', 'COSTS', 'BUFFERS', 'TIMING',
+            'PLAN', 'EXECUTION', 'STATISTICS', 'HINT', 'USE INDEX', 'FORCE INDEX'
+        ]
+        
+        # SQL Functions
+        self.sql_functions = [
+            # Aggregate functions
+            'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'STDDEV', 'VARIANCE',
+            'GROUP_CONCAT', 'STRING_AGG', 'ARRAY_AGG', 'JSON_AGG',
+            
+            # String functions
+            'CONCAT', 'SUBSTRING', 'SUBSTR', 'LENGTH', 'CHAR_LENGTH',
+            'UPPER', 'LOWER', 'TRIM', 'LTRIM', 'RTRIM', 'REPLACE',
+            'REGEXP_REPLACE', 'SPLIT_PART', 'POSITION', 'INSTR',
+            'LEFT', 'RIGHT', 'REVERSE', 'REPEAT', 'LPAD', 'RPAD',
+            'ASCII', 'CHR', 'INITCAP', 'TRANSLATE', 'SOUNDEX',
+            
+            # Mathematical functions
+            'ABS', 'CEIL', 'CEILING', 'FLOOR', 'ROUND', 'TRUNC', 'TRUNCATE',
+            'POWER', 'POW', 'SQRT', 'EXP', 'LN', 'LOG', 'LOG10',
+            'SIN', 'COS', 'TAN', 'ASIN', 'ACOS', 'ATAN', 'ATAN2',
+            'DEGREES', 'RADIANS', 'PI', 'RAND', 'RANDOM', 'SIGN',
+            'MOD', 'GREATEST', 'LEAST',
+            
+            # Date/Time functions
+            'NOW', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP',
+            'TODAY', 'YESTERDAY', 'TOMORROW', 'DATE', 'TIME', 'DATETIME',
+            'EXTRACT', 'DATE_PART', 'DATE_TRUNC', 'DATE_ADD', 'DATE_SUB',
+            'DATEDIFF', 'DATEADD', 'YEAR', 'MONTH', 'DAY', 'HOUR',
+            'MINUTE', 'SECOND', 'MICROSECOND', 'DAYOFWEEK', 'DAYOFYEAR',
+            'WEEK', 'WEEKDAY', 'QUARTER', 'LAST_DAY', 'NEXT_DAY',
+            'AGE', 'TIMEZONE', 'TO_TIMESTAMP', 'FROM_UNIXTIME',
+            
+            # Type conversion functions
+            'CAST', 'CONVERT', 'TRY_CAST', 'TRY_CONVERT', 'SAFE_CAST',
+            'TO_CHAR', 'TO_NUMBER', 'TO_DATE', 'PARSE_DATE', 'PARSE_DATETIME',
+            
+            # Conditional functions
+            'COALESCE', 'ISNULL', 'IFNULL', 'NULLIF', 'NVL', 'NVL2',
+            'DECODE', 'CHOOSE', 'IIF',
+            
+            # Window functions
+            'ROW_NUMBER', 'RANK', 'DENSE_RANK', 'PERCENT_RANK', 'CUME_DIST',
+            'NTILE', 'LAG', 'LEAD', 'FIRST_VALUE', 'LAST_VALUE', 'NTH_VALUE',
+            
+            # JSON functions
+            'JSON_EXTRACT', 'JSON_UNQUOTE', 'JSON_ARRAY', 'JSON_OBJECT',
+            'JSON_KEYS', 'JSON_LENGTH', 'JSON_VALID', 'JSON_TYPE',
+            
+            # Array functions
+            'ARRAY_LENGTH', 'ARRAY_POSITION', 'ARRAY_REMOVE', 'ARRAY_REPLACE',
+            'ARRAY_APPEND', 'ARRAY_PREPEND', 'ARRAY_CONTAINS', 'UNNEST',
+            
+            # System functions
+            'VERSION', 'USER', 'CURRENT_USER', 'SESSION_USER', 'SYSTEM_USER',
+            'DATABASE', 'SCHEMA', 'CONNECTION_ID', 'LAST_INSERT_ID',
+            'ROW_COUNT', 'FOUND_ROWS'
+        ]
+        
+        # Combine all completions
+        all_completions = self.sql_keywords + self.sql_functions
+        
+        # Create model
+        self.model = QStringListModel(all_completions)
+        self.setModel(self.model)
+        
+        # Store for dynamic updates
+        self.table_names = []
+        self.column_names = []
+        
+    def update_table_names(self, table_names):
+        """Update the list of available table names"""
+        self.table_names = table_names
+        self.refresh_completions()
+        
+    def update_column_names(self, column_names):
+        """Update the list of available column names"""
+        self.column_names = column_names
+        self.refresh_completions()
+        
+    def refresh_completions(self):
+        """Refresh the completion model with current keywords, functions, tables, and columns"""
+        all_completions = (self.sql_keywords + self.sql_functions + 
+                         self.table_names + self.column_names)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_completions = []
+        for item in all_completions:
+            if item.upper() not in seen:
+                unique_completions.append(item)
+                seen.add(item.upper())
+                
+        self.model.setStringList(unique_completions)
+
+# Enhanced SQL Text Editor with auto-completion
+class SQLTextEdit(QTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.completer = SQLCompleter(self)
+        self.completer.setWidget(self)
+        self.completer.activated.connect(self.insert_completion)
+        
+        # Set up the text editor
+        self.setFont(QFont("Consolas", 11))
+        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.setTabStopDistance(40)  # 4 spaces for tab
+        
+        # Connect to text change for auto-completion
+        self.textChanged.connect(self.on_text_changed)
+        
+        # Track cursor position for better completion
+        self.cursorPositionChanged.connect(self.on_cursor_changed)
+        
+    def insert_completion(self, completion):
+        """Insert the selected completion into the text"""
+        cursor = self.textCursor()
+        
+        # Find the start of the current word
+        current_word = self.get_current_word()
+        if current_word:
+            # Replace the current word with the completion
+            cursor.movePosition(QTextCursor.MoveOperation.Left, 
+                              QTextCursor.MoveMode.KeepAnchor, len(current_word))
+            cursor.removeSelectedText()
+            
+        cursor.insertText(completion)
+        self.setTextCursor(cursor)
+        
+    def get_current_word(self):
+        """Get the word currently being typed"""
+        cursor = self.textCursor()
+        cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+        return cursor.selectedText()
+        
+    def on_text_changed(self):
+        """Handle text changes for auto-completion"""
+        current_word = self.get_current_word()
+        
+        # Only show completions if we have at least 2 characters
+        if len(current_word) >= 2:
+            self.completer.setCompletionPrefix(current_word)
+            
+            # Position the completion popup
+            cursor_rect = self.cursorRect()
+            cursor_rect.setWidth(self.completer.popup().sizeHintForColumn(0) + 
+                               self.completer.popup().verticalScrollBar().sizeHint().width())
+            self.completer.complete(cursor_rect)
+        else:
+            self.completer.popup().hide()
+            
+    def on_cursor_changed(self):
+        """Handle cursor position changes"""
+        # Hide completion popup if cursor moves away from the word being completed
+        if not self.get_current_word():
+            self.completer.popup().hide()
+            
+    def keyPressEvent(self, event):
+        """Handle key press events"""
+        # Handle special keys for completion
+        if self.completer.popup().isVisible():
+            if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return, Qt.Key.Key_Tab):
+                event.ignore()
+                return
+            elif event.key() == Qt.Key.Key_Escape:
+                self.completer.popup().hide()
+                return
+                
+        # Auto-indentation for new lines
+        if event.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return):
+            cursor = self.textCursor()
+            cursor.insertText('\n')
+            
+            # Get the indentation of the current line
+            cursor.movePosition(QTextCursor.MoveOperation.Up)
+            cursor.movePosition(QTextCursor.MoveOperation.StartOfLine)
+            cursor.movePosition(QTextCursor.MoveOperation.EndOfLine, 
+                              QTextCursor.MoveMode.KeepAnchor)
+            line_text = cursor.selectedText()
+            
+            # Calculate indentation
+            indent = ''
+            for char in line_text:
+                if char in ' \t':
+                    indent += char
+                else:
+                    break
+                    
+            # Insert the same indentation on the new line
+            cursor.movePosition(QTextCursor.MoveOperation.Down)
+            cursor.insertText(indent)
+            
+            self.setTextCursor(cursor)
+            return
+            
+        # Auto-completion for parentheses, quotes, etc.
+        if event.text() == '(':
+            cursor = self.textCursor()
+            cursor.insertText('()')
+            cursor.movePosition(QTextCursor.MoveOperation.Left)
+            self.setTextCursor(cursor)
+            return
+        elif event.text() == '[':
+            cursor = self.textCursor()
+            cursor.insertText('[]')
+            cursor.movePosition(QTextCursor.MoveOperation.Left)
+            self.setTextCursor(cursor)
+            return
+        elif event.text() in ['"', "'"]:
+            cursor = self.textCursor()
+            quote = event.text()
+            cursor.insertText(quote + quote)
+            cursor.movePosition(QTextCursor.MoveOperation.Left)
+            self.setTextCursor(cursor)
+            return
+            
+        super().keyPressEvent(event)
+        
+    def update_completions(self, table_names=None, column_names=None):
+        """Update the completer with new table and column names"""
+        if table_names is not None:
+            self.completer.update_table_names(table_names)
+        if column_names is not None:
+            self.completer.update_column_names(column_names)
+
 # SQL Syntax Highlighter
 class SQLHighlighter(QSyntaxHighlighter):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.highlighting_rules = []
+        self.setup_highlighting_rules()
 
-        # SQL Keywords (Primary commands)
+    def setup_highlighting_rules(self):
+        # Clear existing rules
+        self.highlighting_rules = []
+
+        # SQL Keywords (Primary commands) - Most important, put first
         keyword_format = QTextCharFormat()
-        keyword_format.setForeground(ColorScheme.KEYWORD)
+        keyword_format.setForeground(QColor(198, 120, 221))  # Purple - explicit color
         keyword_format.setFontWeight(QFont.Weight.Bold)
-        primary_keywords = [
-            "\bSELECT\b", "\bFROM\b", "\bWHERE\b", "\bINSERT\b", "\bUPDATE\b", "\bDELETE\b",
-            "\bCREATE\b", "\bALTER\b", "\bDROP\b", "\bTRUNCATE\b", "\bBEGIN\b", "\bCOMMIT\b", "\bROLLBACK\b"
+        
+        sql_keywords = [
+            'SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP',
+            'TRUNCATE', 'BEGIN', 'COMMIT', 'ROLLBACK', 'DISTINCT', 'AS', 'INTO', 'VALUES', 'SET',
+            'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET', 'UNION', 'UNION ALL',
+            'INTERSECT', 'EXCEPT', 'WITH', 'RECURSIVE'
         ]
-        for pattern in primary_keywords:
-            self.highlighting_rules.append((QRegularExpression(pattern, QRegularExpression.CaseInsensitiveOption), keyword_format))
+        
+        for keyword in sql_keywords:
+            # Use word boundaries to match whole words only
+            pattern = f"\\b{keyword}\\b"
+            regex = QRegularExpression(pattern, QRegularExpression.CaseInsensitiveOption)
+            self.highlighting_rules.append((regex, keyword_format))
 
         # SQL Operators and Logic
         operator_format = QTextCharFormat()
-        operator_format.setForeground(ColorScheme.OPERATOR)
+        operator_format.setForeground(QColor(86, 182, 194))  # Cyan - explicit color
         operator_format.setFontWeight(QFont.Weight.Bold)
+        
         operators = [
-            "\bAND\b", "\bOR\b", "\bNOT\b", "\bIN\b", "\bLIKE\b", "\bBETWEEN\b", "\bEXISTS\b",
-            "\bIS\b", "\bNULL\b", "\bIS NULL\b", "\bIS NOT NULL\b", "\bALL\b", "\bANY\b", "\bSOME\b",
-            "=", "!=", "<>", "<", ">", "<=", ">=", "\+", "-", "\*", "/", "%"
+            'AND', 'OR', 'NOT', 'IN', 'LIKE', 'BETWEEN', 'EXISTS', 'IS', 'NULL',
+            'IS NULL', 'IS NOT NULL', 'ALL', 'ANY', 'SOME'
         ]
-        for pattern in operators:
-            self.highlighting_rules.append((QRegularExpression(pattern, QRegularExpression.CaseInsensitiveOption), operator_format))
+        
+        for operator in operators:
+            pattern = f"\\b{operator}\\b"
+            regex = QRegularExpression(pattern, QRegularExpression.CaseInsensitiveOption)
+            self.highlighting_rules.append((regex, operator_format))
 
-        # SQL Functions (Built-in functions)
+        # Operator symbols
+        operator_symbols = ['=', '!=', '<>', '<', '>', '<=', '>=', '\\+', '-', '\\*', '/', '%']
+        for symbol in operator_symbols:
+            regex = QRegularExpression(symbol)
+            self.highlighting_rules.append((regex, operator_format))
+
+        # SQL Functions
         function_format = QTextCharFormat()
-        function_format.setForeground(ColorScheme.FUNCTION)
+        function_format.setForeground(QColor(97, 175, 239))  # Blue - explicit color
         function_format.setFontWeight(QFont.Weight.Bold)
+        
         functions = [
-            "\bCOUNT\b", "\bSUM\b", "\bAVG\b", "\bMAX\b", "\bMIN\b", "\bGROUP_CONCAT\b",
-            "\bCOALESCE\b", "\bNULLIF\b", "\bCAST\b", "\bCONVERT\b", "\bSUBSTR\b", "\bLENGTH\b",
-            "\bUPPER\b", "\bLOWER\b", "\bTRIM\b", "\bLTRIM\b", "\bRTRIM\b", "\bREPLACE\b",
-            "\bROW_NUMBER\b", "\bRANK\b", "\bDENSE_RANK\b", "\bLEAD\b", "\bLAG\b",
-            "\bFIRST_VALUE\b", "\bLAST_VALUE\b", "\bNTILE\b", "\bDATE\b", "\bTIME\b",
-            "\bDATETIME\b", "\bNOW\b", "\bCURDATE\b", "\bCURTIME\b"
+            'COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'GROUP_CONCAT', 'COALESCE', 'NULLIF',
+            'CAST', 'CONVERT', 'SUBSTRING', 'SUBSTR', 'LENGTH', 'UPPER', 'LOWER',
+            'TRIM', 'LTRIM', 'RTRIM', 'REPLACE', 'NOW', 'CURRENT_DATE', 'CURRENT_TIME'
         ]
-        for pattern in functions:
-            self.highlighting_rules.append((QRegularExpression(pattern, QRegularExpression.CaseInsensitiveOption), function_format))
+        
+        for function in functions:
+            pattern = f"\\b{function}\\b"
+            regex = QRegularExpression(pattern, QRegularExpression.CaseInsensitiveOption)
+            self.highlighting_rules.append((regex, function_format))
+
+        # JOIN keywords
+        join_format = QTextCharFormat()
+        join_format.setForeground(QColor(75, 160, 240))  # Accent blue - explicit color
+        join_format.setFontWeight(QFont.Weight.Bold)
+        
+        joins = ['JOIN', 'INNER JOIN', 'LEFT JOIN', 'RIGHT JOIN', 'FULL JOIN', 'CROSS JOIN', 'ON', 'USING']
+        for join in joins:
+            pattern = f"\\b{join}\\b"
+            regex = QRegularExpression(pattern, QRegularExpression.CaseInsensitiveOption)
+            self.highlighting_rules.append((regex, join_format))
 
         # Data Types
         datatype_format = QTextCharFormat()
-        datatype_format.setForeground(ColorScheme.DATA_TYPE)
+        datatype_format.setForeground(QColor(209, 154, 102))  # Tan - explicit color
         datatype_format.setFontWeight(QFont.Weight.Bold)
+        
         datatypes = [
-            "\bINTEGER\b", "\bINT\b", "\bBIGINT\b", "\bSMALLINT\b", "\bTINYINT\b",
-            "\bVARCHAR\b", "\bCHAR\b", "\bTEXT\b", "\bSTRING\b", "\bCLOB\b",
-            "\bREAL\b", "\bFLOAT\b", "\bDOUBLE\b", "\bNUMERIC\b", "\bDECIMAL\b",
-            "\bDATE\b", "\bTIME\b", "\bTIMESTAMP\b", "\bDATETIME\b",
-            "\bBOOLEAN\b", "\bBOOL\b", "\bBLOB\b", "\bBINARY\b"
+            'INTEGER', 'INT', 'BIGINT', 'SMALLINT', 'TINYINT', 'VARCHAR', 'CHAR', 'TEXT',
+            'REAL', 'FLOAT', 'DOUBLE', 'NUMERIC', 'DECIMAL', 'DATE', 'TIME', 'TIMESTAMP',
+            'DATETIME', 'BOOLEAN', 'BOOL', 'BLOB', 'BINARY'
         ]
-        for pattern in datatypes:
-            self.highlighting_rules.append((QRegularExpression(pattern, QRegularExpression.CaseInsensitiveOption), datatype_format))
+        
+        for datatype in datatypes:
+            pattern = f"\\b{datatype}\\b"
+            regex = QRegularExpression(pattern, QRegularExpression.CaseInsensitiveOption)
+            self.highlighting_rules.append((regex, datatype_format))
 
-        # SQL Clauses and Modifiers
-        clause_format = QTextCharFormat()
-        clause_format.setForeground(ColorScheme.ACCENT)
-        clause_format.setFontWeight(QFont.Weight.Bold)
-        clauses = [
-            "\bJOIN\b", "\bINNER JOIN\b", "\bLEFT JOIN\b", "\bRIGHT JOIN\b", "\bFULL JOIN\b",
-            "\bGROUP BY\b", "\bORDER BY\b", "\bHAVING\b", "\bLIMIT\b", "\bOFFSET\b",
-            "\bUNION\b", "\bUNION ALL\b", "\bINTERSECT\b", "\bEXCEPT\b",
-            "\bCASE\b", "\bWHEN\b", "\bTHEN\b", "\bELSE\b", "\bEND\b",
-            "\bDISTINCT\b", "\bAS\b", "\bON\b", "\bUSING\b", "\bINTO\b", "\bVALUES\b", "\bSET\b",
-            "\bWITH\b", "\bRECURSIVE\b", "\bOVER\b", "\bPARTITION BY\b", "\bWINDOW\b"
-        ]
-        for pattern in clauses:
-            self.highlighting_rules.append((QRegularExpression(pattern, QRegularExpression.CaseInsensitiveOption), clause_format))
-
-        # Numbers (integers and decimals)
-        number_format = QTextCharFormat()
-        number_format.setForeground(ColorScheme.NUMBER)
-        number_format.setFontWeight(QFont.Weight.Bold)
-        self.highlighting_rules.append((QRegularExpression("\\b\\d+\\.\\d+\\b"), number_format))  # Decimals
-        self.highlighting_rules.append((QRegularExpression("\\b\\d+\\b"), number_format))  # Integers
-
-        # String literals (single and double quotes)
+        # String literals (quoted strings)
         string_format = QTextCharFormat()
-        string_format.setForeground(ColorScheme.STRING)
+        string_format.setForeground(QColor(152, 195, 121))  # Green - explicit color
         string_format.setFontItalic(True)
+        
+        # Single quoted strings
         self.highlighting_rules.append((QRegularExpression("'[^']*'"), string_format))
+        # Double quoted strings
         self.highlighting_rules.append((QRegularExpression('"[^"]*"'), string_format))
 
-        # Table names (after FROM, JOIN, UPDATE, INSERT INTO, etc.)
-        table_format = QTextCharFormat()
-        table_format.setForeground(ColorScheme.TABLE_NAME)
-        table_format.setFontWeight(QFont.Weight.Bold)
-        # This is a simplified pattern - in practice, table name detection is complex
-        self.highlighting_rules.append((QRegularExpression("(?i)(?:FROM|JOIN|UPDATE|INSERT\\s+INTO)\\s+([a-zA-Z_][a-zA-Z0-9_]*)", QRegularExpression.CaseInsensitiveOption), table_format))
+        # Numbers
+        number_format = QTextCharFormat()
+        number_format.setForeground(QColor(229, 192, 123))  # Orange - explicit color
+        number_format.setFontWeight(QFont.Weight.Bold)
+        
+        # Decimal numbers
+        self.highlighting_rules.append((QRegularExpression("\\b\\d+\\.\\d+\\b"), number_format))
+        # Integer numbers
+        self.highlighting_rules.append((QRegularExpression("\\b\\d+\\b"), number_format))
 
-        # Comments (single line and multi-line)
+        # Comments
         comment_format = QTextCharFormat()
-        comment_format.setForeground(ColorScheme.COMMENT)
+        comment_format.setForeground(QColor(128, 128, 128))  # Gray - explicit color
         comment_format.setFontItalic(True)
+        
+        # Single line comments
         self.highlighting_rules.append((QRegularExpression("--[^\n]*"), comment_format))
         
         # Multi-line comment setup
         self.multiline_comment_format = QTextCharFormat()
-        self.multiline_comment_format.setForeground(ColorScheme.COMMENT)
+        self.multiline_comment_format.setForeground(QColor(128, 128, 128))  # Gray - explicit color
         self.multiline_comment_format.setFontItalic(True)
         self.comment_start_expression = QRegularExpression("/\\*")
         self.comment_end_expression = QRegularExpression("\\*/")
 
     def highlightBlock(self, text):
+        # Debug: Print what we're highlighting (comment out in production)
+        # print(f"Highlighting text: '{text}'")
+        
         # Apply single-line highlighting rules
-        for pattern, format in self.highlighting_rules:
+        for pattern, format_obj in self.highlighting_rules:
             match_iterator = pattern.globalMatch(text)
             while match_iterator.hasNext():
                 match = match_iterator.next()
-                self.setFormat(match.capturedStart(), match.capturedLength(), format)
+                start = match.capturedStart()
+                length = match.capturedLength()
+                matched_text = text[start:start+length]
+                # Debug: Print matches (comment out in production)
+                # print(f"  Matched: '{matched_text}' at {start}-{start+length}")
+                self.setFormat(start, length, format_obj)
 
         # Handle multi-line comments
         self.setCurrentBlockState(0)
         start_index = 0
         if self.previousBlockState() != 1:
-            start_index = self.comment_start_expression.match(text).capturedStart()
+            match = self.comment_start_expression.match(text)
+            start_index = match.capturedStart() if match.hasMatch() else -1
 
         while start_index >= 0:
             match_end = self.comment_end_expression.match(text, start_index)
-            end_index = match_end.capturedStart()
+            end_index = match_end.capturedStart() if match_end.hasMatch() else -1
             comment_length = 0
+            
             if end_index == -1:
                 self.setCurrentBlockState(1)
                 comment_length = len(text) - start_index
@@ -192,7 +535,12 @@ class SQLHighlighter(QSyntaxHighlighter):
                 comment_length = end_index - start_index + match_end.capturedLength()
             
             self.setFormat(start_index, comment_length, self.multiline_comment_format)
-            start_index = self.comment_start_expression.match(text, start_index + comment_length).capturedStart()
+            
+            if end_index != -1:
+                next_match = self.comment_start_expression.match(text, start_index + comment_length)
+                start_index = next_match.capturedStart() if next_match.hasMatch() else -1
+            else:
+                start_index = -1
 
 # Table model for displaying query results
 class PandasTableModel(QAbstractTableModel):
@@ -931,6 +1279,8 @@ class QueryTab(QWidget):
         self.connection = connection
         self.connection_info = connection_info
         self.query_worker = None
+        self.table_names = []
+        self.column_names = []
         
         # Layout
         self.layout = QVBoxLayout(self)
@@ -939,17 +1289,20 @@ class QueryTab(QWidget):
         # Splitter for editor and results
         self.splitter = QSplitter(Qt.Orientation.Vertical)
         
-        # Query editor
-        self.editor = QTextEdit()
-        self.editor.setFont(QFont("Consolas", 11))
-        self.editor.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
-        self.highlighter = SQLHighlighter(self.editor.document())
+        # Query editor with auto-completion
+        self.editor = SQLTextEdit()
         
-        # Set editor colors
+        # Set editor colors first
         editor_palette = self.editor.palette()
         editor_palette.setColor(QPalette.ColorRole.Base, ColorScheme.BACKGROUND)
         editor_palette.setColor(QPalette.ColorRole.Text, ColorScheme.TEXT)
         self.editor.setPalette(editor_palette)
+        
+        # Apply syntax highlighting after setting up the editor
+        self.highlighter = SQLHighlighter(self.editor.document())
+        
+        # Force a refresh of syntax highlighting
+        QTimer.singleShot(100, self.highlighter.rehighlight)
         
         # Results area
         self.results_widget = QWidget()
@@ -1037,15 +1390,42 @@ class QueryTab(QWidget):
     def handle_query_error(self, error_message):
         self.results_info.setText(f"Error: {error_message}")
         self.editor.setReadOnly(False)
+        
+    def update_schema_completions(self, table_names=None, column_names=None):
+        """Update the auto-completion with table and column names from the schema"""
+        if table_names is not None:
+            self.table_names = table_names
+        if column_names is not None:
+            self.column_names = column_names
+            
+        # Update the editor's completer
+        self.editor.update_completions(self.table_names, self.column_names)
 
 # Database schema browser
 class SchemaBrowser(QTreeWidget):
+    # Signal to notify when schema data is updated (table_names, column_names)
+    schema_data_updated = pyqtSignal(list, list)
+    # Signal to notify when schema structure changes (table/column deleted)
+    schema_changed = pyqtSignal()
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setHeaderLabels(["Database Objects"])
         self.setColumnCount(1)
         self.setAlternatingRowColors(True)
         self.setAnimated(True)
+        
+        # Store schema data for auto-completion
+        self.table_names = []
+        self.column_names = []
+        
+        # Store connection references for context menu operations
+        self.connection = None
+        self.connection_info = None
+        
+        # Enable context menu
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
         
         # Set colors
         palette = self.palette()
@@ -1065,6 +1445,10 @@ class SchemaBrowser(QTreeWidget):
     def load_schema(self, connection, connection_info):
         self.clear()
         
+        # Store connection references for context menu operations
+        self.connection = connection
+        self.connection_info = connection_info
+        
         db_type = connection_info["type"].lower()
         if db_type in ["sqlite", "sqlite3"]:
             self.load_sqlite_schema(connection)
@@ -1074,6 +1458,10 @@ class SchemaBrowser(QTreeWidget):
             print(f"Unknown database type: {connection_info['type']}")
     
     def load_sqlite_schema(self, connection):
+        # Clear existing schema data
+        self.table_names = []
+        self.column_names = []
+        
         # Create root item for database
         db_item = QTreeWidgetItem(self, [os.path.basename(connection.database)])
         db_item.setIcon(0, qta.icon('fa5s.database', color=ColorScheme.ACCENT))
@@ -1094,8 +1482,12 @@ class SchemaBrowser(QTreeWidget):
         else:
             for table in tables:
                 table_name = table[0]
+                self.table_names.append(table_name)  # Collect table name for auto-completion
+                
                 table_item = QTreeWidgetItem(tables_item, [table_name])
                 table_item.setIcon(0, self.table_icon)
+                # Store metadata for context menu
+                table_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'table', 'name': table_name})
                 
                 # Get columns for this table
                 cursor.execute(f"PRAGMA table_info({table_name})")
@@ -1106,9 +1498,15 @@ class SchemaBrowser(QTreeWidget):
                     col_type = column[2]
                     is_pk = column[5] == 1  # Primary key flag
                     
+                    # Collect column name for auto-completion (avoid duplicates)
+                    if col_name not in self.column_names:
+                        self.column_names.append(col_name)
+                    
                     column_text = f"{col_name} ({col_type})"
                     column_item = QTreeWidgetItem(table_item, [column_text])
                     column_item.setIcon(0, self.pk_icon if is_pk else self.column_icon)
+                    # Store metadata for context menu
+                    column_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'column', 'name': col_name, 'table': table_name, 'is_pk': is_pk})
         
         # Views group
         cursor.execute("SELECT name FROM sqlite_master WHERE type='view' ORDER BY name")
@@ -1120,8 +1518,14 @@ class SchemaBrowser(QTreeWidget):
             
             for view in views:
                 view_name = view[0]
+                self.table_names.append(view_name)  # Views can also be queried like tables
                 view_item = QTreeWidgetItem(views_item, [view_name])
                 view_item.setIcon(0, self.view_icon)
+                # Store metadata for context menu
+                view_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'view', 'name': view_name})
+        
+        # Emit signal with collected schema data
+        self.schema_data_updated.emit(self.table_names, self.column_names)
         
         # Indexes group
         cursor.execute("SELECT name, tbl_name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name")
@@ -1142,6 +1546,10 @@ class SchemaBrowser(QTreeWidget):
         tables_item.setExpanded(True)
     
     def load_duckdb_schema(self, connection):
+        # Clear existing schema data
+        self.table_names = []
+        self.column_names = []
+        
         # Create root item for database
         db_item = QTreeWidgetItem(self, ["DuckDB Database"])
         db_item.setIcon(0, qta.icon('fa5s.database', color=ColorScheme.ACCENT))
@@ -1160,8 +1568,12 @@ class SchemaBrowser(QTreeWidget):
         else:
             for _, row in tables_df.iterrows():
                 table_name = row['name']
+                self.table_names.append(table_name)  # Collect table name for auto-completion
+                
                 table_item = QTreeWidgetItem(tables_item, [table_name])
                 table_item.setIcon(0, self.table_icon)
+                # Store metadata for context menu
+                table_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'table', 'name': table_name})
                 
                 # Get columns for this table
                 try:
@@ -1172,9 +1584,15 @@ class SchemaBrowser(QTreeWidget):
                         col_type = col_row['type']
                         is_pk = col_row['pk'] == 1  # Primary key flag
                         
+                        # Collect column name for auto-completion (avoid duplicates)
+                        if col_name not in self.column_names:
+                            self.column_names.append(col_name)
+                        
                         column_text = f"{col_name} ({col_type})"
                         column_item = QTreeWidgetItem(table_item, [column_text])
                         column_item.setIcon(0, self.pk_icon if is_pk else self.column_icon)
+                        # Store metadata for context menu
+                        column_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'column', 'name': col_name, 'table': table_name, 'is_pk': is_pk})
                 except Exception as e:
                     print(f"Error loading columns for table {table_name}: {e}")
         
@@ -1188,15 +1606,333 @@ class SchemaBrowser(QTreeWidget):
                 
                 for _, row in views_df.iterrows():
                     view_name = row['view_name']
+                    self.table_names.append(view_name)  # Views can also be queried like tables
                     view_item = QTreeWidgetItem(views_item, [view_name])
                     view_item.setIcon(0, self.view_icon)
+                    # Store metadata for context menu
+                    view_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'view', 'name': view_name})
         except:
             # Some versions of DuckDB might not have this view
             pass
         
+        # Emit signal with collected schema data
+        self.schema_data_updated.emit(self.table_names, self.column_names)
+        
         # Expand the database item
         db_item.setExpanded(True)
         tables_item.setExpanded(True)
+    
+    def show_context_menu(self, position):
+        """Show context menu for the schema browser"""
+        item = self.itemAt(position)
+        if not item:
+            return
+        
+        # Get item metadata
+        item_data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not item_data:
+            return
+        
+        # Create context menu
+        menu = QMenu(self)
+        
+        # Add actions based on item type
+        if item_data['type'] == 'table':
+            delete_action = QAction(qta.icon('fa5s.trash', color=ColorScheme.ERROR), f"Delete Table '{item_data['name']}'", self)
+            delete_action.triggered.connect(lambda: self.delete_table(item_data['name']))
+            menu.addAction(delete_action)
+            
+        elif item_data['type'] == 'view':
+            delete_action = QAction(qta.icon('fa5s.trash', color=ColorScheme.ERROR), f"Delete View '{item_data['name']}'", self)
+            delete_action.triggered.connect(lambda: self.delete_view(item_data['name']))
+            menu.addAction(delete_action)
+            
+        elif item_data['type'] == 'column':
+            if not item_data.get('is_pk', False):  # Don't allow deleting primary keys
+                delete_action = QAction(qta.icon('fa5s.trash', color=ColorScheme.ERROR), f"Delete Column '{item_data['name']}'", self)
+                delete_action.triggered.connect(lambda: self.delete_column(item_data['table'], item_data['name']))
+                menu.addAction(delete_action)
+            else:
+                info_action = QAction(qta.icon('fa5s.info-circle', color=ColorScheme.WARNING), "Cannot delete primary key column", self)
+                info_action.setEnabled(False)
+                menu.addAction(info_action)
+        
+        # Show the menu
+        if menu.actions():
+            menu.exec(self.mapToGlobal(position))
+    
+    def delete_table(self, table_name):
+        """Delete a table with confirmation"""
+        if not self.connection or not self.connection_info:
+            QMessageBox.warning(self, "Error", "No database connection available.")
+            return
+        
+        # Confirmation dialog
+        reply = QMessageBox.question(
+            self, 
+            "Confirm Delete", 
+            f"Are you sure you want to delete the table '{table_name}'?\n\nThis action cannot be undone and will permanently delete all data in the table.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                # Execute DROP TABLE with multiple fallback strategies
+                success = False
+                error_messages = []
+                
+                # Strategy 1: Try with double quotes
+                try:
+                    if self.connection_info['type'].lower() in ['sqlite', 'sqlite3']:
+                        cursor = self.connection.cursor()
+                        cursor.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+                        self.connection.commit()
+                    else:  # DuckDB
+                        self.connection.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+                    success = True
+                except Exception as e1:
+                    error_messages.append(f"Double quotes: {str(e1)}")
+                
+                # Strategy 2: Try without quotes if first attempt failed
+                if not success:
+                    try:
+                        if self.connection_info['type'].lower() in ['sqlite', 'sqlite3']:
+                            cursor = self.connection.cursor()
+                            cursor.execute(f'DROP TABLE IF EXISTS {table_name}')
+                            self.connection.commit()
+                        else:  # DuckDB
+                            self.connection.execute(f'DROP TABLE IF EXISTS {table_name}')
+                        success = True
+                    except Exception as e2:
+                        error_messages.append(f"No quotes: {str(e2)}")
+                
+                # Strategy 3: Try with square brackets (for some SQL dialects)
+                if not success:
+                    try:
+                        if self.connection_info['type'].lower() in ['sqlite', 'sqlite3']:
+                            cursor = self.connection.cursor()
+                            cursor.execute(f'DROP TABLE IF EXISTS [{table_name}]')
+                            self.connection.commit()
+                        else:  # DuckDB
+                            self.connection.execute(f'DROP TABLE IF EXISTS [{table_name}]')
+                        success = True
+                    except Exception as e3:
+                        error_messages.append(f"Square brackets: {str(e3)}")
+                
+                if success:
+                    # Refresh schema browser
+                    self.load_schema(self.connection, self.connection_info)
+                    
+                    # Emit schema changed signal
+                    self.schema_changed.emit()
+                    
+                    # Show success message
+                    QMessageBox.information(self, "Success", f"Table '{table_name}' has been deleted successfully.")
+                else:
+                    # All strategies failed
+                    error_detail = "\n".join(error_messages)
+                    QMessageBox.critical(self, "Error", f"Failed to delete table '{table_name}' using all strategies:\n\n{error_detail}")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Unexpected error while deleting table '{table_name}':\n{str(e)}")
+    
+    def delete_view(self, view_name):
+        """Delete a view with confirmation"""
+        if not self.connection or not self.connection_info:
+            QMessageBox.warning(self, "Error", "No database connection available.")
+            return
+        
+        # Confirmation dialog
+        reply = QMessageBox.question(
+            self, 
+            "Confirm Delete", 
+            f"Are you sure you want to delete the view '{view_name}'?\n\nThis action cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                # Execute DROP VIEW with multiple fallback strategies
+                success = False
+                error_messages = []
+                
+                # Strategy 1: Try with double quotes
+                try:
+                    if self.connection_info['type'].lower() in ['sqlite', 'sqlite3']:
+                        cursor = self.connection.cursor()
+                        cursor.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+                        self.connection.commit()
+                    else:  # DuckDB
+                        self.connection.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+                    success = True
+                except Exception as e1:
+                    error_messages.append(f"Double quotes: {str(e1)}")
+                
+                # Strategy 2: Try without quotes if first attempt failed
+                if not success:
+                    try:
+                        if self.connection_info['type'].lower() in ['sqlite', 'sqlite3']:
+                            cursor = self.connection.cursor()
+                            cursor.execute(f'DROP VIEW IF EXISTS {view_name}')
+                            self.connection.commit()
+                        else:  # DuckDB
+                            self.connection.execute(f'DROP VIEW IF EXISTS {view_name}')
+                        success = True
+                    except Exception as e2:
+                        error_messages.append(f"No quotes: {str(e2)}")
+                
+                # Strategy 3: Try with square brackets
+                if not success:
+                    try:
+                        if self.connection_info['type'].lower() in ['sqlite', 'sqlite3']:
+                            cursor = self.connection.cursor()
+                            cursor.execute(f'DROP VIEW IF EXISTS [{view_name}]')
+                            self.connection.commit()
+                        else:  # DuckDB
+                            self.connection.execute(f'DROP VIEW IF EXISTS [{view_name}]')
+                        success = True
+                    except Exception as e3:
+                        error_messages.append(f"Square brackets: {str(e3)}")
+                
+                if success:
+                    # Refresh schema browser
+                    self.load_schema(self.connection, self.connection_info)
+                    
+                    # Emit schema changed signal
+                    self.schema_changed.emit()
+                    
+                    # Show success message
+                    QMessageBox.information(self, "Success", f"View '{view_name}' has been deleted successfully.")
+                else:
+                    # All strategies failed
+                    error_detail = "\n".join(error_messages)
+                    QMessageBox.critical(self, "Error", f"Failed to delete view '{view_name}' using all strategies:\n\n{error_detail}")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Unexpected error while deleting view '{view_name}':\n{str(e)}")
+    
+    def delete_column(self, table_name, column_name):
+        """Delete a column with confirmation"""
+        if not self.connection or not self.connection_info:
+            QMessageBox.warning(self, "Error", "No database connection available.")
+            return
+        
+        # Confirmation dialog
+        reply = QMessageBox.question(
+            self, 
+            "Confirm Delete", 
+            f"Are you sure you want to delete the column '{column_name}' from table '{table_name}'?\n\nThis action cannot be undone and will permanently delete all data in this column.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                # Note: SQLite has limited ALTER TABLE support, so we need different approaches
+                success = False
+                error_messages = []
+                
+                if self.connection_info['type'].lower() in ['sqlite', 'sqlite3']:
+                    # For SQLite, we need to recreate the table without the column
+                    cursor = self.connection.cursor()
+                    
+                    # Get table schema with multiple strategies
+                    columns = None
+                    for quote_style in ['"', '', '`']:
+                        try:
+                            if quote_style:
+                                cursor.execute(f'PRAGMA table_info({quote_style}{table_name}{quote_style})')
+                            else:
+                                cursor.execute(f'PRAGMA table_info({table_name})')
+                            columns = cursor.fetchall()
+                            break
+                        except:
+                            continue
+                    
+                    if not columns:
+                        QMessageBox.critical(self, "Error", f"Could not retrieve table schema for '{table_name}'.")
+                        return
+                    
+                    # Create new column list without the deleted column
+                    remaining_columns = [col[1] for col in columns if col[1] != column_name]
+                    
+                    if len(remaining_columns) == 0:
+                        QMessageBox.warning(self, "Error", "Cannot delete the last column of a table.")
+                        return
+                    
+                    # Try multiple quoting strategies for SQLite
+                    for quote_style in ['"', '', '`']:
+                        try:
+                            # Start transaction
+                            cursor.execute("BEGIN TRANSACTION")
+                            
+                            try:
+                                # Create temporary table with remaining columns
+                                if quote_style:
+                                    column_list = ", ".join([f'{quote_style}{col}{quote_style}' for col in remaining_columns])
+                                    cursor.execute(f'CREATE TABLE {quote_style}{table_name}_temp{quote_style} AS SELECT {column_list} FROM {quote_style}{table_name}{quote_style}')
+                                    
+                                    # Drop original table
+                                    cursor.execute(f'DROP TABLE {quote_style}{table_name}{quote_style}')
+                                    
+                                    # Rename temp table to original name
+                                    cursor.execute(f'ALTER TABLE {quote_style}{table_name}_temp{quote_style} RENAME TO {quote_style}{table_name}{quote_style}')
+                                else:
+                                    column_list = ", ".join(remaining_columns)
+                                    cursor.execute(f'CREATE TABLE {table_name}_temp AS SELECT {column_list} FROM {table_name}')
+                                    
+                                    # Drop original table
+                                    cursor.execute(f'DROP TABLE {table_name}')
+                                    
+                                    # Rename temp table to original name
+                                    cursor.execute(f'ALTER TABLE {table_name}_temp RENAME TO {table_name}')
+                                
+                                # Commit transaction
+                                cursor.execute("COMMIT")
+                                success = True
+                                break
+                                
+                            except Exception as e:
+                                # Rollback on error
+                                cursor.execute("ROLLBACK")
+                                error_messages.append(f"SQLite with {quote_style or 'no'} quotes: {str(e)}")
+                                
+                        except Exception as e:
+                            error_messages.append(f"SQLite transaction with {quote_style or 'no'} quotes: {str(e)}")
+                        
+                else:  # DuckDB
+                    # Try multiple quoting strategies for DuckDB
+                    for quote_style in ['"', '', '`']:
+                        try:
+                            if quote_style:
+                                self.connection.execute(f'ALTER TABLE {quote_style}{table_name}{quote_style} DROP COLUMN {quote_style}{column_name}{quote_style}')
+                            else:
+                                self.connection.execute(f'ALTER TABLE {table_name} DROP COLUMN {column_name}')
+                            success = True
+                            break
+                        except Exception as e:
+                            error_messages.append(f"DuckDB with {quote_style or 'no'} quotes: {str(e)}")
+                
+                if not success:
+                    error_detail = "\n".join(error_messages)
+                    QMessageBox.critical(self, "Error", f"Failed to delete column '{column_name}' from table '{table_name}' using all strategies:\n\n{error_detail}")
+                    return
+                
+                # Only refresh if successful
+                if success:
+                    # Refresh schema browser
+                    self.load_schema(self.connection, self.connection_info)
+                    
+                    # Emit schema changed signal
+                    self.schema_changed.emit()
+                    
+                    # Show success message
+                    QMessageBox.information(self, "Success", f"Column '{column_name}' has been deleted from table '{table_name}' successfully.")
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Unexpected error while deleting column '{column_name}' from table '{table_name}':\n{str(e)}")
 
 # Main application window
 class SQLEditorApp(QMainWindow):
@@ -1223,6 +1959,10 @@ class SQLEditorApp(QMainWindow):
         # Create schema browser
         self.schema_browser = SchemaBrowser()
         self.schema_browser.setMinimumWidth(250)
+        
+        # Connect schema browser signals
+        self.schema_browser.schema_data_updated.connect(self.update_all_tabs_completions)
+        self.schema_browser.schema_changed.connect(self.refresh_schema_browser)
         
         # Create tab widget for query editors
         self.tab_widget = QTabWidget()
@@ -1301,6 +2041,13 @@ class SQLEditorApp(QMainWindow):
         """Refresh the schema browser immediately"""
         if self.current_connection and self.current_connection_info:
             self.schema_browser.load_schema(self.current_connection, self.current_connection_info)
+            
+    def update_all_tabs_completions(self, table_names, column_names):
+        """Update auto-completion for all query tabs when schema changes"""
+        for i in range(self.tab_widget.count()):
+            tab = self.tab_widget.widget(i)
+            if isinstance(tab, QueryTab):
+                tab.update_schema_completions(table_names, column_names)
     
     def check_schema_changes(self):
         """Check for schema changes and refresh if needed"""
@@ -1795,7 +2542,8 @@ class SQLEditorApp(QMainWindow):
             self.statusBar().showMessage("Disconnected from database", 3000)
     
     def import_data(self, import_info):
-        """Import data from file to database"""
+        """Import data from file to database with bulletproof error handling"""
+        file_path = None
         try:
             file_path = import_info['file_path']
             table_name = import_info['table_name']
@@ -1805,52 +2553,22 @@ class SQLEditorApp(QMainWindow):
             # Show progress
             self.statusBar().showMessage(f"Importing {os.path.basename(file_path)}...")
             
-            # Load data based on file type
-            df = None
-            
-            if file_type == '.csv':
-                df = pd.read_csv(
-                    file_path,
-                    delimiter=import_info.get('delimiter', ','),
-                    encoding=import_info.get('encoding', 'utf-8'),
-                    header=0 if import_info.get('header', True) else None
-                )
-            
-            elif file_type == '.tsv':
-                df = pd.read_csv(
-                    file_path,
-                    delimiter=import_info.get('delimiter', '\t'),
-                    encoding=import_info.get('encoding', 'utf-8'),
-                    header=0 if import_info.get('header', True) else None
-                )
-            
-            elif file_type == '.txt':
-                df = pd.read_csv(
-                    file_path,
-                    delimiter=import_info.get('delimiter', ','),
-                    encoding=import_info.get('encoding', 'utf-8'),
-                    header=0 if import_info.get('header', True) else None
-                )
-            
-            elif file_type in ['.xlsx', '.xls']:
-                sheet_name = import_info.get('sheet_name', 0)
-                df = pd.read_excel(file_path, sheet_name=sheet_name)
-            
-            elif file_type == '.parquet':
-                df = pd.read_parquet(file_path)
-            
-            elif file_type == '.json':
-                df = pd.read_json(file_path)
-            
-            else:
-                raise ValueError(f"Unsupported file type: {file_type}")
+            # Load data based on file type with robust error handling
+            df = self.safe_load_data(file_path, file_type, import_info)
             
             if df is None or df.empty:
-                QMessageBox.warning(self, "Import Error", "No data found in the file.")
+                QMessageBox.warning(self, "Import Error", "No data found in the file or file could not be read.")
                 return
+            
+            # Report original data info
+            original_rows, original_cols = df.shape
+            self.statusBar().showMessage(f"Processing {original_rows:,} rows × {original_cols} columns...")
             
             # Clean column names for database compatibility
             df.columns = [self.clean_column_name(col) for col in df.columns]
+            
+            # Sanitize all data to prevent import errors
+            df = self.sanitize_dataframe(df)
             
             # Handle import mode
             if mode == 'replace':
@@ -1864,89 +2582,427 @@ class SQLEditorApp(QMainWindow):
                 except:
                     pass  # Table might not exist
             
-            # Import data to database
-            if self.current_connection_info['type'].lower() == 'duckdb':
-                # DuckDB import
-                if mode == 'create':
-                    # Check if table exists for create mode
-                    try:
-                        result = self.current_connection.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
-                        if result is not None:
-                            raise ValueError(f"Table '{table_name}' already exists. Use 'Replace' mode to overwrite or 'Append' to add data.")
-                    except:
-                        pass  # Table doesn't exist, which is what we want for create mode
-                    df.to_sql(table_name, self.current_connection, if_exists='fail', index=False)
-                elif mode == 'append':
-                    self.flexible_append_data(df, table_name, 'duckdb')
-                else:  # replace
-                    df.to_sql(table_name, self.current_connection, if_exists='replace', index=False)
+            # Import data to database with bulletproof error handling
+            success = self.safe_import_to_database(df, table_name, mode)
+            
+            if success:
+                # Update schema browser immediately
+                self.refresh_schema_browser()
+                
+                # Show success message
+                rows, cols = df.shape
+                mode_text = {
+                    'create': 'created',
+                    'append': 'appended to',
+                    'replace': 'replaced'
+                }[mode]
+                
+                QMessageBox.information(
+                    self, 
+                    "Import Successful", 
+                    f"Successfully {mode_text} table '{table_name}'!\n\n"
+                    f"📊 {rows:,} rows × {cols} columns imported\n"
+                    f"📁 Source: {os.path.basename(file_path)}\n\n"
+                    f"✅ All data was automatically converted to compatible formats"
+                )
+                
+                self.statusBar().showMessage(f"Import completed: {rows:,} rows imported to '{table_name}'", 5000)
+                
+                # Add a query to the current tab to show the imported data
+                current_tab = self.tab_widget.currentWidget()
+                if current_tab and not current_tab.editor.toPlainText().strip():
+                    current_tab.editor.setPlainText(f"SELECT * FROM {table_name} LIMIT 100;")
             else:
-                # SQLite import
-                if mode == 'create':
-                    # Check if table exists for create mode
-                    cursor = self.current_connection.cursor()
-                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
-                    if cursor.fetchone():
-                        raise ValueError(f"Table '{table_name}' already exists. Use 'Replace' mode to overwrite or 'Append' to add data.")
-                    df.to_sql(table_name, self.current_connection, if_exists='fail', index=False)
-                elif mode == 'append':
-                    self.flexible_append_data(df, table_name, 'sqlite')
-                else:  # replace
-                    df.to_sql(table_name, self.current_connection, if_exists='replace', index=False)
-                self.current_connection.commit()
-            
-            # Update schema browser immediately
-            self.refresh_schema_browser()
-            
-            # Show success message
-            rows, cols = df.shape
-            mode_text = {
-                'create': 'created',
-                'append': 'appended to',
-                'replace': 'replaced'
-            }[mode]
-            
-            QMessageBox.information(
-                self, 
-                "Import Successful", 
-                f"Successfully {mode_text} table '{table_name}'!\n\n"
-                f"📊 {rows:,} rows × {cols} columns imported\n"
-                f"📁 Source: {os.path.basename(file_path)}"
-            )
-            
-            self.statusBar().showMessage(f"Import completed: {rows:,} rows imported to '{table_name}'", 5000)
-            
-            # Add a query to the current tab to show the imported data
-            current_tab = self.tab_widget.currentWidget()
-            if current_tab and not current_tab.editor.toPlainText().strip():
-                current_tab.editor.setPlainText(f"SELECT * FROM {table_name} LIMIT 100;")
+                QMessageBox.warning(self, "Import Warning", "Import completed but some issues were encountered. Data was converted to text format for compatibility.")
             
         except Exception as e:
-            QMessageBox.critical(self, "Import Error", f"Failed to import data: {str(e)}")
-            self.statusBar().showMessage(f"Import failed: {str(e)}", 5000)
+            error_msg = str(e)
+            if file_path:
+                file_info = f" (File: {os.path.basename(file_path)})"
+            else:
+                file_info = ""
+            
+            # Show user-friendly error messages
+            if "permission denied" in error_msg.lower():
+                user_msg = f"Cannot access the file{file_info}. Please check if:\n• The file is open in another program\n• You have permission to read the file\n• The file path is correct"
+            elif "encoding" in error_msg.lower() or "codec" in error_msg.lower():
+                user_msg = f"File encoding issue{file_info}. Try selecting a different encoding (utf-8, latin-1, cp1252)"
+            elif "memory" in error_msg.lower():
+                user_msg = f"File is too large to import{file_info}. Try importing a smaller file or contact support"
+            elif "connection" in error_msg.lower():
+                user_msg = "Database connection error. Please reconnect to the database and try again"
+            else:
+                user_msg = f"Import failed{file_info}.\n\nTechnical details: {error_msg}"
+            
+            QMessageBox.critical(self, "Import Error", user_msg)
+            self.statusBar().showMessage(f"Import failed: {error_msg}", 5000)
+    
+    def safe_load_data(self, file_path, file_type, import_info):
+        """Safely load data from any file type with robust error handling"""
+        df = None
+        
+        try:
+            if file_type == '.csv':
+                # Try multiple encoding strategies for CSV
+                encodings = [import_info.get('encoding', 'utf-8'), 'utf-8', 'latin-1', 'cp1252', 'iso-8859-1']
+                for encoding in encodings:
+                    try:
+                        df = pd.read_csv(
+                            file_path,
+                            delimiter=import_info.get('delimiter', ','),
+                            encoding=encoding,
+                            header=0 if import_info.get('header', True) else None,
+                            on_bad_lines='skip',  # Skip bad lines instead of failing
+                            low_memory=False,     # Read entire file to avoid dtype warnings
+                            dtype=str             # Read everything as string initially
+                        )
+                        print(f"Successfully loaded CSV with encoding: {encoding}")
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                    except Exception as e:
+                        if encoding == encodings[-1]:  # Last encoding attempt
+                            print(f"CSV load failed with all encodings: {e}")
+                            # Try to load with different parameters
+                            try:
+                                df = pd.read_csv(file_path, delimiter=',', encoding='utf-8', header=None, on_bad_lines='skip', dtype=str)
+                            except:
+                                pass
+            
+            elif file_type == '.tsv':
+                try:
+                    df = pd.read_csv(
+                        file_path,
+                        delimiter=import_info.get('delimiter', '\t'),
+                        encoding=import_info.get('encoding', 'utf-8'),
+                        header=0 if import_info.get('header', True) else None,
+                        on_bad_lines='skip',
+                        dtype=str
+                    )
+                except:
+                    # Fallback
+                    df = pd.read_csv(file_path, delimiter='\t', encoding='utf-8', header=None, on_bad_lines='skip', dtype=str)
+            
+            elif file_type == '.txt':
+                try:
+                    df = pd.read_csv(
+                        file_path,
+                        delimiter=import_info.get('delimiter', ','),
+                        encoding=import_info.get('encoding', 'utf-8'),
+                        header=0 if import_info.get('header', True) else None,
+                        on_bad_lines='skip',
+                        dtype=str
+                    )
+                except:
+                    # Fallback
+                    df = pd.read_csv(file_path, delimiter=',', encoding='utf-8', header=None, on_bad_lines='skip', dtype=str)
+            
+            elif file_type in ['.xlsx', '.xls']:
+                try:
+                    sheet_name = import_info.get('sheet_name', 0)
+                    df = pd.read_excel(file_path, sheet_name=sheet_name, dtype=str)
+                except Exception as e:
+                    print(f"Excel load failed: {e}")
+                    # Try reading first sheet as fallback
+                    try:
+                        df = pd.read_excel(file_path, sheet_name=0, dtype=str)
+                    except:
+                        pass
+            
+            elif file_type == '.parquet':
+                try:
+                    df = pd.read_parquet(file_path)
+                    # Convert to string to avoid type issues
+                    df = df.astype(str)
+                except Exception as e:
+                    print(f"Parquet load failed: {e}")
+            
+            elif file_type == '.json':
+                try:
+                    df = pd.read_json(file_path)
+                    # Convert to string to avoid type issues
+                    df = df.astype(str)
+                except Exception as e:
+                    print(f"JSON load failed: {e}")
+                    # Try alternative JSON loading
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            import json
+                            data = json.load(f)
+                            if isinstance(data, list):
+                                df = pd.DataFrame(data)
+                            elif isinstance(data, dict):
+                                df = pd.DataFrame([data])
+                            df = df.astype(str)
+                    except:
+                        pass
+            
+        except Exception as e:
+            print(f"Failed to load {file_type} file: {e}")
+            
+        return df
+    
+    def sanitize_dataframe(self, df):
+        """Sanitize dataframe to prevent any import errors by converting problematic data to text"""
+        try:
+            print(f"Sanitizing dataframe with {len(df)} rows and {len(df.columns)} columns")
+            
+            # Create a copy to avoid modifying the original
+            df_clean = df.copy()
+            
+            # Handle column names - ensure they're clean
+            df_clean.columns = [str(col).strip() if col is not None else f"col_{i}" for i, col in enumerate(df_clean.columns)]
+            
+            # Process each column
+            for col in df_clean.columns:
+                try:
+                    # Convert the entire column to string initially
+                    df_clean[col] = df_clean[col].astype(str)
+                    
+                    # Handle specific problematic values
+                    df_clean[col] = df_clean[col].replace({
+                        'nan': None,
+                        'NaN': None,
+                        'None': None,
+                        'null': None,
+                        'NULL': None,
+                        '': None,
+                        'inf': 'infinity',
+                        '-inf': '-infinity',
+                        'Infinity': 'infinity',
+                        '-Infinity': '-infinity'
+                    })
+                    
+                    # Remove any remaining problematic characters
+                    df_clean[col] = df_clean[col].apply(lambda x: self.safe_string_convert(x) if x is not None else None)
+                    
+                except Exception as e:
+                    print(f"Error processing column {col}: {e}")
+                    # If anything fails, convert entire column to safe strings
+                    df_clean[col] = df_clean[col].apply(lambda x: str(x) if x is not None else None)
+            
+            # Remove completely empty rows
+            df_clean = df_clean.dropna(how='all')
+            
+            # Ensure no column names are duplicated
+            cols = df_clean.columns.tolist()
+            seen = set()
+            unique_cols = []
+            for col in cols:
+                original_col = col
+                counter = 1
+                while col in seen:
+                    col = f"{original_col}_{counter}"
+                    counter += 1
+                seen.add(col)
+                unique_cols.append(col)
+            df_clean.columns = unique_cols
+            
+            print(f"Sanitization complete: {len(df_clean)} rows × {len(df_clean.columns)} columns")
+            return df_clean
+            
+        except Exception as e:
+            print(f"Sanitization failed: {e}")
+            # Last resort: convert everything to string
+            try:
+                df_safe = pd.DataFrame()
+                for i, col in enumerate(df.columns):
+                    col_name = f"column_{i}" if col is None or str(col).strip() == '' else str(col)
+                    df_safe[col_name] = df.iloc[:, i].apply(lambda x: str(x) if x is not None else None)
+                return df_safe
+            except:
+                # Ultimate fallback: return empty dataframe with at least one column
+                return pd.DataFrame({'data': ['No data could be imported']})
+    
+    def safe_string_convert(self, value):
+        """Safely convert any value to a database-compatible string"""
+        try:
+            if value is None or pd.isna(value):
+                return None
+            
+            # Handle different types
+            if isinstance(value, (int, float)):
+                if pd.isna(value) or pd.isinf(value):
+                    return None
+                return str(value)
+            
+            # Convert to string and handle encoding issues
+            str_val = str(value)
+            
+            # Remove or replace problematic characters
+            str_val = str_val.replace('\x00', '')  # Remove null bytes
+            str_val = str_val.replace('\r\n', '\n')  # Normalize line endings
+            str_val = str_val.replace('\r', '\n')
+            
+            # Limit string length to prevent database issues
+            if len(str_val) > 10000:  # Reasonable limit
+                str_val = str_val[:10000] + "...[truncated]"
+            
+            return str_val
+            
+        except Exception:
+            return "conversion_error"
+    
+    def safe_import_to_database(self, df, table_name, mode):
+        """Safely import dataframe to database with multiple fallback strategies"""
+        try:
+            db_type = self.current_connection_info['type'].lower()
+            
+            # Strategy 1: Try normal import
+            try:
+                if db_type == 'duckdb':
+                    if mode == 'create':
+                        # Check if table exists for create mode
+                        try:
+                            result = self.current_connection.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
+                            if result is not None:
+                                raise ValueError(f"Table '{table_name}' already exists. Use 'Replace' mode to overwrite or 'Append' to add data.")
+                        except:
+                            pass  # Table doesn't exist, which is what we want for create mode
+                        df.to_sql(table_name, self.current_connection, if_exists='fail', index=False, method='multi')
+                    elif mode == 'append':
+                        self.flexible_append_data(df, table_name, 'duckdb')
+                    else:  # replace
+                        df.to_sql(table_name, self.current_connection, if_exists='replace', index=False, method='multi')
+                else:
+                    # SQLite import
+                    if mode == 'create':
+                        # Check if table exists for create mode
+                        cursor = self.current_connection.cursor()
+                        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+                        if cursor.fetchone():
+                            raise ValueError(f"Table '{table_name}' already exists. Use 'Replace' mode to overwrite or 'Append' to add data.")
+                        df.to_sql(table_name, self.current_connection, if_exists='fail', index=False, method='multi')
+                    elif mode == 'append':
+                        self.flexible_append_data(df, table_name, 'sqlite')
+                    else:  # replace
+                        df.to_sql(table_name, self.current_connection, if_exists='replace', index=False, method='multi')
+                    self.current_connection.commit()
+                
+                print("Normal import successful")
+                return True
+                
+            except Exception as e:
+                print(f"Normal import failed: {e}")
+                
+                # Strategy 2: Force all columns to TEXT type
+                try:
+                    print("Trying with all TEXT columns...")
+                    
+                    # Create table manually with all TEXT columns
+                    columns_sql = ", ".join([f'"{col}" TEXT' for col in df.columns])
+                    
+                    if mode == 'replace':
+                        self.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+                    
+                    create_sql = f"CREATE TABLE IF NOT EXISTS {table_name} ({columns_sql})"
+                    self.current_connection.execute(create_sql)
+                    
+                    if db_type == 'sqlite':
+                        self.current_connection.commit()
+                    
+                    # Insert data row by row if needed
+                    df.to_sql(table_name, self.current_connection, if_exists='append', index=False)
+                    
+                    if db_type == 'sqlite':
+                        self.current_connection.commit()
+                    
+                    print("TEXT columns import successful")
+                    return True
+                    
+                except Exception as e2:
+                    print(f"TEXT columns import failed: {e2}")
+                    
+                    # Strategy 3: Row-by-row insert with error handling
+                    try:
+                        print("Trying row-by-row insert...")
+                        
+                        # Ensure table exists
+                        if mode == 'replace':
+                            self.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+                        
+                        # Create table with generic structure
+                        columns_sql = ", ".join([f'"{col}" TEXT' for col in df.columns])
+                        create_sql = f"CREATE TABLE IF NOT EXISTS {table_name} ({columns_sql})"
+                        self.current_connection.execute(create_sql)
+                        
+                        if db_type == 'sqlite':
+                            self.current_connection.commit()
+                        
+                        # Insert rows one by one, skipping problematic ones
+                        successful_rows = 0
+                        placeholders = ", ".join(["?" for _ in df.columns])
+                        insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
+                        
+                        for idx, row in df.iterrows():
+                            try:
+                                values = [self.safe_string_convert(val) for val in row.values]
+                                self.current_connection.execute(insert_sql, values)
+                                successful_rows += 1
+                                
+                                if successful_rows % 1000 == 0:
+                                    if db_type == 'sqlite':
+                                        self.current_connection.commit()
+                                    print(f"Inserted {successful_rows} rows...")
+                                    
+                            except Exception as row_error:
+                                print(f"Skipped row {idx}: {row_error}")
+                                continue
+                        
+                        if db_type == 'sqlite':
+                            self.current_connection.commit()
+                        
+                        print(f"Row-by-row insert completed: {successful_rows} rows inserted")
+                        return True
+                        
+                    except Exception as e3:
+                        print(f"Row-by-row insert failed: {e3}")
+                        return False
+        
+        except Exception as e:
+            print(f"Safe import completely failed: {e}")
+            return False
     
     def flexible_append_data(self, df, table_name, db_type):
-        """Append data with flexible column handling - adds missing columns automatically"""
+        """Append data with flexible column handling - adds missing columns automatically and handles all errors"""
         try:
-            # Get existing table schema
-            if db_type == 'duckdb':
-                try:
+            # Get existing table schema with error handling
+            existing_columns = set()
+            table_exists = False
+            
+            try:
+                if db_type == 'duckdb':
                     existing_columns_df = self.current_connection.execute(f"PRAGMA table_info('{table_name}')").fetchdf()
                     existing_columns = set(existing_columns_df['name'].tolist())
-                except:
-                    # Table doesn't exist, create it
-                    df.to_sql(table_name, self.current_connection, if_exists='fail', index=False)
-                    return
-            else:  # sqlite
-                try:
+                    table_exists = True
+                else:  # sqlite
                     cursor = self.current_connection.cursor()
                     cursor.execute(f"PRAGMA table_info({table_name})")
                     existing_columns = set([row[1] for row in cursor.fetchall()])
-                except:
-                    # Table doesn't exist, create it
-                    df.to_sql(table_name, self.current_connection, if_exists='fail', index=False)
-                    self.current_connection.commit()
+                    table_exists = True
+            except:
+                table_exists = False
+            
+            if not table_exists:
+                # Table doesn't exist, create it with all TEXT columns for safety
+                try:
+                    columns_sql = ", ".join([f'"{col}" TEXT' for col in df.columns])
+                    create_sql = f"CREATE TABLE {table_name} ({columns_sql})"
+                    self.current_connection.execute(create_sql)
+                    
+                    if db_type == 'sqlite':
+                        self.current_connection.commit()
+                    
+                    # Now insert the data
+                    df.to_sql(table_name, self.current_connection, if_exists='append', index=False)
+                    
+                    if db_type == 'sqlite':
+                        self.current_connection.commit()
                     return
+                except Exception as e:
+                    print(f"Failed to create new table: {e}")
+                    # Use safe import as fallback
+                    return self.safe_import_to_database(df, table_name, 'create')
             
             # Get new columns from the dataframe
             new_columns = set(df.columns)
@@ -1954,28 +3010,18 @@ class SQLEditorApp(QMainWindow):
             # Find columns that need to be added to the existing table
             missing_columns = new_columns - existing_columns
             
-            # Add missing columns to the existing table
+            # Add missing columns to the existing table (always as TEXT for safety)
             if missing_columns:
                 print(f"Adding new columns to table '{table_name}': {', '.join(missing_columns)}")
                 for col in missing_columns:
-                    # Determine column type based on data
-                    sample_value = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
-                    
-                    if sample_value is None:
-                        col_type = "TEXT"
-                    elif isinstance(sample_value, (int, pd.Int64Dtype)):
-                        col_type = "INTEGER"
-                    elif isinstance(sample_value, (float, pd.Float64Dtype)):
-                        col_type = "REAL"
-                    elif isinstance(sample_value, bool):
-                        col_type = "BOOLEAN"
-                    else:
-                        col_type = "TEXT"
-                    
-                    # Add the column
-                    alter_sql = f"ALTER TABLE {table_name} ADD COLUMN {col} {col_type}"
-                    self.current_connection.execute(alter_sql)
-                    
+                    try:
+                        # Always use TEXT type to avoid conflicts
+                        alter_sql = f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT'
+                        self.current_connection.execute(alter_sql)
+                    except Exception as alter_error:
+                        print(f"Failed to add column {col}: {alter_error}")
+                        # Continue with other columns
+                        
                 if db_type == 'sqlite':
                     self.current_connection.commit()
             
@@ -1990,25 +3036,52 @@ class SQLEditorApp(QMainWindow):
             all_columns = list(existing_columns) + list(missing_columns)
             df = df.reindex(columns=all_columns)
             
-            # Now append the data
-            df.to_sql(table_name, self.current_connection, if_exists='append', index=False)
+            # Convert all data to strings to prevent type conflicts
+            for col in df.columns:
+                df[col] = df[col].apply(lambda x: self.safe_string_convert(x) if x is not None else None)
             
-            if db_type == 'sqlite':
-                self.current_connection.commit()
+            # Try to append the data
+            try:
+                df.to_sql(table_name, self.current_connection, if_exists='append', index=False)
                 
-            # Show info about column changes
-            if missing_columns:
-                self.statusBar().showMessage(
-                    f"Added {len(missing_columns)} new columns: {', '.join(list(missing_columns)[:3])}{'...' if len(missing_columns) > 3 else ''}", 
-                    5000
-                )
+                if db_type == 'sqlite':
+                    self.current_connection.commit()
+                    
+            except Exception as append_error:
+                print(f"Bulk append failed: {append_error}")
+                
+                # Try row-by-row insert as fallback
+                try:
+                    successful_rows = 0
+                    placeholders = ", ".join(["?" for _ in df.columns])
+                    insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
+                    
+                    for idx, row in df.iterrows():
+                        try:
+                            values = [self.safe_string_convert(val) for val in row.values]
+                            self.current_connection.execute(insert_sql, values)
+                            successful_rows += 1
+                            
+                            if successful_rows % 100 == 0 and db_type == 'sqlite':
+                                self.current_connection.commit()
+                                
+                        except Exception as row_error:
+                            print(f"Skipped problematic row {idx}: {row_error}")
+                            continue
+                    
+                    if db_type == 'sqlite':
+                        self.current_connection.commit()
+                        
+                    print(f"Flexible append completed: {successful_rows} rows inserted")
+                    
+                except Exception as row_error:
+                    print(f"Row-by-row insert also failed: {row_error}")
+                    raise
                 
         except Exception as e:
-            # Fallback to regular append if flexible append fails
-            print(f"Flexible append failed, falling back to regular append: {e}")
-            df.to_sql(table_name, self.current_connection, if_exists='append', index=False)
-            if db_type == 'sqlite':
-                self.current_connection.commit()
+            # Final fallback to safe import
+            print(f"Flexible append completely failed: {e}")
+            return self.safe_import_to_database(df, table_name, 'append')
     
     def clean_column_name(self, column_name):
         """Clean column name for database compatibility"""
