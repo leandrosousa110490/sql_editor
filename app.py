@@ -1150,8 +1150,26 @@ class DataImportDialog(QDialog):
         csv_options_layout = QFormLayout(self.csv_options_widget)
         
         delimiter_layout = QHBoxLayout()
+        
+        # Delimiter dropdown with common options
+        self.delimiter_combo = QComboBox()
+        self.delimiter_combo.setMaximumWidth(120)
+        self.delimiter_combo.addItems([
+            "Comma (,)",
+            "Semicolon (;)", 
+            "Tab (\\t)",
+            "Pipe (|)",
+            "Space ( )",
+            "Custom..."
+        ])
+        self.delimiter_combo.setCurrentText("Comma (,)")
+        self.delimiter_combo.currentTextChanged.connect(self.on_delimiter_changed)
+        
+        # Custom delimiter input (initially hidden)
         self.delimiter_edit = QLineEdit(",")
-        self.delimiter_edit.setMaximumWidth(80)
+        self.delimiter_edit.setMaximumWidth(60)
+        self.delimiter_edit.setPlaceholderText("Custom")
+        self.delimiter_edit.hide()
         
         self.auto_detect_button = QPushButton("🔍 Auto")
         self.auto_detect_button.setMaximumWidth(60)
@@ -1170,6 +1188,7 @@ class DataImportDialog(QDialog):
             QPushButton:hover { background-color: #138496; }
         """)
         
+        delimiter_layout.addWidget(self.delimiter_combo)
         delimiter_layout.addWidget(self.delimiter_edit)
         delimiter_layout.addWidget(self.auto_detect_button)
         delimiter_layout.addStretch()
@@ -1242,6 +1261,44 @@ class DataImportDialog(QDialog):
         scroll_area.setWidget(content_widget)
         main_layout.addWidget(scroll_area)
     
+    def on_delimiter_changed(self):
+        """Handle delimiter dropdown selection change"""
+        selected = self.delimiter_combo.currentText()
+        
+        if selected == "Custom...":
+            # Show custom input field
+            self.delimiter_edit.show()
+            self.delimiter_edit.setFocus()
+        else:
+            # Hide custom input and set predefined delimiter
+            self.delimiter_edit.hide()
+            
+            # Map display text to actual delimiter
+            delimiter_map = {
+                "Comma (,)": ",",
+                "Semicolon (;)": ";",
+                "Tab (\\t)": "\t",
+                "Pipe (|)": "|",
+                "Space ( )": " "
+            }
+            
+            actual_delimiter = delimiter_map.get(selected, ",")
+            self.delimiter_edit.setText(actual_delimiter)
+    
+    def get_current_delimiter(self):
+        """Get the currently selected delimiter value"""
+        if self.delimiter_combo.currentText() == "Custom...":
+            return self.delimiter_edit.text()
+        else:
+            delimiter_map = {
+                "Comma (,)": ",",
+                "Semicolon (;)": ";",
+                "Tab (\\t)": "\t",
+                "Pipe (|)": "|",
+                "Space ( )": " "
+            }
+            return delimiter_map.get(self.delimiter_combo.currentText(), ",")
+    
     def auto_detect_delimiter(self):
         """Auto-detect delimiter for the selected file"""
         file_path = self.file_path_edit.text()
@@ -1262,24 +1319,38 @@ class DataImportDialog(QDialog):
         if main_app and hasattr(main_app, 'detect_csv_delimiter'):
             detected_delimiter = main_app.detect_csv_delimiter(file_path)
             
-            # Convert tab to visible representation
-            if detected_delimiter == '\t':
-                display_delimiter = '\\t'
-            else:
-                display_delimiter = detected_delimiter
+            # Map detected delimiter to dropdown option
+            delimiter_to_combo = {
+                ',': "Comma (,)",
+                ';': "Semicolon (;)",
+                '\t': "Tab (\\t)",
+                '|': "Pipe (|)",
+                ' ': "Space ( )"
+            }
             
-            self.delimiter_edit.setText(display_delimiter)
+            combo_option = delimiter_to_combo.get(detected_delimiter)
+            
+            if combo_option:
+                # Set the dropdown to the detected delimiter
+                self.delimiter_combo.setCurrentText(combo_option)
+                self.delimiter_edit.hide()  # Hide custom input
+            else:
+                # Use custom option for unusual delimiters
+                self.delimiter_combo.setCurrentText("Custom...")
+                self.delimiter_edit.setText(detected_delimiter)
+                self.delimiter_edit.show()
             
             # Show confirmation
             delimiter_name = {
                 ',': 'comma',
                 ';': 'semicolon', 
                 '\t': 'tab',
-                '|': 'pipe'
+                '|': 'pipe',
+                ' ': 'space'
             }.get(detected_delimiter, f"'{detected_delimiter}'")
             
             QMessageBox.information(self, "Delimiter Detected", 
-                                  f"Detected delimiter: {delimiter_name} ({display_delimiter})")
+                                  f"Detected delimiter: {delimiter_name}")
         else:
             QMessageBox.warning(self, "Error", "Could not access delimiter detection functionality.")
     
@@ -1334,13 +1405,28 @@ class DataImportDialog(QDialog):
                     
                     if main_app and hasattr(main_app, 'detect_csv_delimiter'):
                         detected_delimiter = main_app.detect_csv_delimiter(file_path)
-                        # Convert tab to visible representation
-                        if detected_delimiter == '\t':
-                            self.delimiter_edit.setText('\\t')
+                        
+                        # Map detected delimiter to dropdown option
+                        delimiter_to_combo = {
+                            ',': "Comma (,)",
+                            ';': "Semicolon (;)",
+                            '\t': "Tab (\\t)",
+                            '|': "Pipe (|)",
+                            ' ': "Space ( )"
+                        }
+                        
+                        combo_option = delimiter_to_combo.get(detected_delimiter)
+                        
+                        if combo_option:
+                            self.delimiter_combo.setCurrentText(combo_option)
+                            self.delimiter_edit.hide()
                         else:
+                            self.delimiter_combo.setCurrentText("Custom...")
                             self.delimiter_edit.setText(detected_delimiter)
+                            self.delimiter_edit.show()
                     elif file_ext == '.tsv':
-                        self.delimiter_edit.setText('\\t')
+                        self.delimiter_combo.setCurrentText("Tab (\\t)")
+                        self.delimiter_edit.hide()
                 else:
                     self.csv_options_widget.hide()
             
@@ -1457,7 +1543,7 @@ class DataImportDialog(QDialog):
         
         # Add CSV options if applicable
         if file_ext in ['.csv', '.tsv', '.txt']:
-            import_info['delimiter'] = self.delimiter_edit.text() or ','
+            import_info['delimiter'] = self.get_current_delimiter()
             import_info['encoding'] = self.encoding_combo.currentText()
             import_info['header'] = self.header_checkbox.isChecked()
         
@@ -1647,10 +1733,26 @@ class FolderImportDialog(QDialog):
         csv_options_layout = QFormLayout(self.csv_options_widget)
         
         delimiter_layout = QHBoxLayout()
-        self.delimiter_edit = QLineEdit()
-        self.delimiter_edit.setText(",")
-        self.delimiter_edit.setPlaceholderText("e.g., , or ; or |")
-        self.delimiter_edit.setMaximumWidth(80)
+        
+        # Delimiter dropdown with common options
+        self.delimiter_combo = QComboBox()
+        self.delimiter_combo.setMaximumWidth(120)
+        self.delimiter_combo.addItems([
+            "Comma (,)",
+            "Semicolon (;)", 
+            "Tab (\\t)",
+            "Pipe (|)",
+            "Space ( )",
+            "Custom..."
+        ])
+        self.delimiter_combo.setCurrentText("Comma (,)")
+        self.delimiter_combo.currentTextChanged.connect(self.on_delimiter_changed)
+        
+        # Custom delimiter input (initially hidden)
+        self.delimiter_edit = QLineEdit(",")
+        self.delimiter_edit.setMaximumWidth(60)
+        self.delimiter_edit.setPlaceholderText("Custom")
+        self.delimiter_edit.hide()
         
         self.auto_detect_folder_button = QPushButton("🔍 Auto")
         self.auto_detect_folder_button.setMaximumWidth(60)
@@ -1669,6 +1771,7 @@ class FolderImportDialog(QDialog):
             QPushButton:hover { background-color: #138496; }
         """)
         
+        delimiter_layout.addWidget(self.delimiter_combo)
         delimiter_layout.addWidget(self.delimiter_edit)
         delimiter_layout.addWidget(self.auto_detect_folder_button)
         delimiter_layout.addStretch()
@@ -1802,6 +1905,44 @@ class FolderImportDialog(QDialog):
         # Load existing tables
         self.load_existing_tables()
     
+    def on_delimiter_changed(self):
+        """Handle delimiter dropdown selection change"""
+        selected = self.delimiter_combo.currentText()
+        
+        if selected == "Custom...":
+            # Show custom input field
+            self.delimiter_edit.show()
+            self.delimiter_edit.setFocus()
+        else:
+            # Hide custom input and set predefined delimiter
+            self.delimiter_edit.hide()
+            
+            # Map display text to actual delimiter
+            delimiter_map = {
+                "Comma (,)": ",",
+                "Semicolon (;)": ";",
+                "Tab (\\t)": "\t",
+                "Pipe (|)": "|",
+                "Space ( )": " "
+            }
+            
+            actual_delimiter = delimiter_map.get(selected, ",")
+            self.delimiter_edit.setText(actual_delimiter)
+    
+    def get_current_delimiter(self):
+        """Get the currently selected delimiter value"""
+        if self.delimiter_combo.currentText() == "Custom...":
+            return self.delimiter_edit.text()
+        else:
+            delimiter_map = {
+                "Comma (,)": ",",
+                "Semicolon (;)": ";",
+                "Tab (\\t)": "\t",
+                "Pipe (|)": "|",
+                "Space ( )": " "
+            }
+            return delimiter_map.get(self.delimiter_combo.currentText(), ",")
+    
     def auto_detect_folder_delimiter(self):
         """Auto-detect delimiter from CSV files in the selected folder"""
         if not self.found_files:
@@ -1844,24 +1985,38 @@ class FolderImportDialog(QDialog):
         # Choose the most common delimiter
         best_delimiter = max(delimiter_counts, key=delimiter_counts.get)
         
-        # Convert tab to visible representation
-        if best_delimiter == '\t':
-            display_delimiter = '\\t'
-        else:
-            display_delimiter = best_delimiter
+        # Map detected delimiter to dropdown option
+        delimiter_to_combo = {
+            ',': "Comma (,)",
+            ';': "Semicolon (;)",
+            '\t': "Tab (\\t)",
+            '|': "Pipe (|)",
+            ' ': "Space ( )"
+        }
         
-        self.delimiter_edit.setText(display_delimiter)
+        combo_option = delimiter_to_combo.get(best_delimiter)
+        
+        if combo_option:
+            # Set the dropdown to the detected delimiter
+            self.delimiter_combo.setCurrentText(combo_option)
+            self.delimiter_edit.hide()  # Hide custom input
+        else:
+            # Use custom option for unusual delimiters
+            self.delimiter_combo.setCurrentText("Custom...")
+            self.delimiter_edit.setText(best_delimiter)
+            self.delimiter_edit.show()
         
         # Show confirmation
         delimiter_name = {
             ',': 'comma',
             ';': 'semicolon', 
             '\t': 'tab',
-            '|': 'pipe'
+            '|': 'pipe',
+            ' ': 'space'
         }.get(best_delimiter, f"'{best_delimiter}'")
         
         QMessageBox.information(self, "Delimiter Detected", 
-                              f"Detected delimiter: {delimiter_name} ({display_delimiter})\n"
+                              f"Detected delimiter: {delimiter_name}\n"
                               f"Based on {files_checked} CSV file(s)")
     
     def on_excel_mode_changed(self):
@@ -1978,8 +2133,9 @@ class FolderImportDialog(QDialog):
             
             # Auto-update delimiter for TSV files
             if self.file_type_checkboxes.get("tsv", QCheckBox()).isChecked():
-                if self.delimiter_edit.text() in [",", ""]:
-                    self.delimiter_edit.setText("\\t")
+                if self.delimiter_combo.currentText() == "Comma (,)":
+                    self.delimiter_combo.setCurrentText("Tab (\\t)")
+                    self.delimiter_edit.hide()
             
             # Scan folder for files
             self.found_files = []
@@ -2122,7 +2278,7 @@ class FolderImportDialog(QDialog):
             'add_filename_column': self.add_filename_column.isChecked(),
             'recursive_scan': self.recursive_scan.isChecked(),
             # File-specific options
-            'csv_delimiter': self.delimiter_edit.text() or ',',
+            'csv_delimiter': self.get_current_delimiter(),
             'csv_encoding': self.encoding_combo.currentText(),
             'csv_header': self.header_checkbox.isChecked(),
             'excel_sheet_behavior': self.sheet_behavior_combo.currentText(),
