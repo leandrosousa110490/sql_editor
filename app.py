@@ -16,6 +16,10 @@ import pandas as pd
 from datetime import datetime
 import json
 import re
+import warnings
+
+# Suppress pandas warnings about DuckDB connections
+warnings.filterwarnings('ignore', message='pandas only supports SQLAlchemy connectable.*')
 
 # Additional imports for export functionality
 try:
@@ -4270,35 +4274,24 @@ class SQLEditorApp(QMainWindow):
         try:
             db_type = self.current_connection_info['type'].lower()
             
-            # Strategy 1: Try normal import
+            # Strategy 1: Try database-specific import
             try:
                 if db_type == 'duckdb':
-                    if mode == 'create':
-                        # Check if table exists for create mode
-                        try:
-                            result = self.current_connection.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
-                            if result is not None:
-                                raise ValueError(f"Table '{table_name}' already exists. Use 'Replace' mode to overwrite or 'Append' to add data.")
-                        except:
-                            pass  # Table doesn't exist, which is what we want for create mode
-                        df.to_sql(table_name, self.current_connection, if_exists='fail', index=False, method='multi')
-                    elif mode == 'append':
-                        self.flexible_append_data(df, table_name, 'duckdb')
-                    else:  # replace
-                        df.to_sql(table_name, self.current_connection, if_exists='replace', index=False, method='multi')
+                    # Use DuckDB-specific import method to avoid pandas to_sql issues
+                    return self.duckdb_safe_import(df, table_name, mode)
                 else:
-                    # SQLite import
+                    # SQLite import - use safer method without 'multi'
                     if mode == 'create':
                         # Check if table exists for create mode
                         cursor = self.current_connection.cursor()
                         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
                         if cursor.fetchone():
                             raise ValueError(f"Table '{table_name}' already exists. Use 'Replace' mode to overwrite or 'Append' to add data.")
-                        df.to_sql(table_name, self.current_connection, if_exists='fail', index=False, method='multi')
+                        df.to_sql(table_name, self.current_connection, if_exists='fail', index=False)
                     elif mode == 'append':
                         self.flexible_append_data(df, table_name, 'sqlite')
                     else:  # replace
-                        df.to_sql(table_name, self.current_connection, if_exists='replace', index=False, method='multi')
+                        df.to_sql(table_name, self.current_connection, if_exists='replace', index=False)
                     self.current_connection.commit()
                 
                 print("Normal import successful")
@@ -4391,7 +4384,17 @@ class SQLEditorApp(QMainWindow):
             # For DuckDB, avoid pandas to_sql which can cause transaction issues
             # Instead, create table manually and use INSERT statements
             
-            if mode == 'replace':
+            if mode == 'create':
+                # Check if table exists for create mode
+                try:
+                    result = self.current_connection.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
+                    if result is not None:
+                        raise ValueError(f"Table '{table_name}' already exists. Use 'Replace' mode to overwrite or 'Append' to add data.")
+                except Exception as e:
+                    if "does not exist" not in str(e).lower() and "no such table" not in str(e).lower():
+                        raise e  # Re-raise if it's not a "table doesn't exist" error
+                    # Table doesn't exist, which is what we want for create mode
+            elif mode == 'replace':
                 try:
                     self.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
                 except:
@@ -4403,6 +4406,14 @@ class SQLEditorApp(QMainWindow):
             if mode in ['create', 'replace']:
                 create_sql = f"CREATE TABLE {table_name} ({columns_sql})"
                 self.current_connection.execute(create_sql)
+            elif mode == 'append':
+                # For append mode, table should already exist
+                try:
+                    result = self.current_connection.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
+                except Exception as e:
+                    if "does not exist" in str(e).lower() or "no such table" in str(e).lower():
+                        raise ValueError(f"Table '{table_name}' does not exist. Use 'Create' mode to create a new table.")
+                    raise e
             
             # Insert data using DuckDB's efficient INSERT
             placeholders = ", ".join(["?" for _ in df.columns])
