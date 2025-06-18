@@ -17,6 +17,7 @@ from datetime import datetime
 import json
 import re
 import warnings
+import time
 
 # Suppress pandas warnings about DuckDB connections
 warnings.filterwarnings('ignore', message='pandas only supports SQLAlchemy connectable.*')
@@ -637,11 +638,10 @@ class ImportWorker(QThread):
     finished = pyqtSignal(bool, str)  # success, message
     error = pyqtSignal(str)
     
-    def __init__(self, main_app, import_info, is_folder=False):
+    def __init__(self, main_app, import_info):
         super().__init__()
         self.main_app = main_app
         self.import_info = import_info
-        self.is_folder = is_folder
         self.cancelled = False
     
     def cancel(self):
@@ -650,12 +650,8 @@ class ImportWorker(QThread):
     
     def run(self):
         try:
-            if self.is_folder:
-                self.progress.emit(5, "Starting optimized folder import...")
-                success = self.main_app.import_folder_data_optimized(self.import_info, self)
-            else:
-                self.progress.emit(5, "Starting optimized file import...")
-                success = self.main_app.import_data_optimized(self.import_info, self)
+            self.progress.emit(5, "Starting optimized file import...")
+            success = self.main_app.import_data_optimized(self.import_info, self)
             
             if self.cancelled:
                 self.finished.emit(False, "Import was cancelled by user.")
@@ -1556,748 +1552,6 @@ class DataImportDialog(QDialog):
             import_info['header'] = self.header_checkbox.isChecked()
         
         return import_info
-
-
-class FolderImportDialog(QDialog):
-    """Dialog for importing multiple files from a folder"""
-    
-    def __init__(self, parent=None, connection=None, connection_info=None):
-        super().__init__(parent)
-        self.connection = connection
-        self.connection_info = connection_info
-        self.setWindowTitle("Import Folder")
-        self.setModal(True)
-        self.resize(950, 1100)  # Made even larger
-        self.setMinimumSize(800, 900)  # Set larger minimum size
-        
-        # Add window flags to allow maximize, minimize, and close buttons
-        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowMaximizeButtonHint | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
-        
-
-        self.found_files = []
-        self.init_ui()
-    
-    def init_ui(self):
-        # Create main layout for the dialog
-        main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(5, 5, 5, 5)
-        
-        # Create scroll area
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        
-        # Create content widget for the scroll area
-        content_widget = QWidget()
-        layout = QVBoxLayout(content_widget)
-        layout.setSpacing(15)
-        layout.setContentsMargins(20, 20, 20, 20)
-        
-        # Title
-        title_label = QLabel("📁 Import All Files from Folder")
-        title_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #0078d4; margin-bottom: 10px;")
-        layout.addWidget(title_label)
-        
-        # Folder selection
-        folder_group = QGroupBox("Select Folder")
-        folder_layout = QVBoxLayout(folder_group)
-        
-        folder_path_layout = QHBoxLayout()
-        self.folder_path_edit = QLineEdit()
-        self.folder_path_edit.setPlaceholderText("Select a folder containing data files...")
-        self.folder_path_edit.setReadOnly(True)
-        
-        self.browse_folder_button = QPushButton("📁 Browse Folder")
-        self.browse_folder_button.clicked.connect(self.browse_folder)
-        self.browse_folder_button.setStyleSheet("""
-            QPushButton {
-                background-color: #0078d4;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #106ebe; }
-        """)
-        
-        folder_path_layout.addWidget(self.folder_path_edit)
-        folder_path_layout.addWidget(self.browse_folder_button)
-        folder_layout.addLayout(folder_path_layout)
-        
-        # Folder info
-        self.folder_info_label = QLabel("No folder selected")
-        self.folder_info_label.setStyleSheet("color: #666; font-style: italic;")
-        folder_layout.addWidget(self.folder_info_label)
-        
-        layout.addWidget(folder_group)
-        
-        # File type filter
-        filter_group = QGroupBox("File Type Filter")
-        filter_layout = QVBoxLayout(filter_group)
-        
-        # Checkboxes for file types
-        self.file_type_checkboxes = {}
-        file_types = [
-            ("csv", "CSV Files (*.csv)", False),
-            ("xlsx", "Excel Files (*.xlsx, *.xls)", False),
-            ("json", "JSON Files (*.json)", False),
-            ("parquet", "Parquet Files (*.parquet)", False),
-            ("tsv", "TSV Files (*.tsv)", False),
-            ("txt", "Text Files (*.txt)", False)
-        ]
-        
-        checkbox_layout = QGridLayout()
-        for i, (ext, label, checked) in enumerate(file_types):
-            checkbox = QCheckBox(label)
-            checkbox.setChecked(checked)
-            checkbox.stateChanged.connect(self.update_file_scan)
-            self.file_type_checkboxes[ext] = checkbox
-            checkbox_layout.addWidget(checkbox, i // 2, i % 2)
-        
-        filter_layout.addLayout(checkbox_layout)
-        layout.addWidget(filter_group)
-        
-        # Found files display
-        files_group = QGroupBox("Found Files")
-        files_layout = QVBoxLayout(files_group)
-        
-        self.files_list = QListWidget()
-        self.files_list.setMaximumHeight(100)
-        files_layout.addWidget(self.files_list)
-        
-        self.files_info_label = QLabel("No files found")
-        self.files_info_label.setStyleSheet("color: #666; font-style: italic;")
-        files_layout.addWidget(self.files_info_label)
-        
-        layout.addWidget(files_group)
-        
-        # Import options
-        options_group = QGroupBox("Import Options")
-        options_layout = QVBoxLayout(options_group)
-        
-        # Table name input
-        table_name_layout = QHBoxLayout()
-        table_name_layout.addWidget(QLabel("Table Name:"))
-        self.table_name_edit = QLineEdit()
-        self.table_name_edit.setPlaceholderText("Enter table name for combined data...")
-        table_name_layout.addWidget(self.table_name_edit)
-        options_layout.addLayout(table_name_layout)
-        
-        # Import mode
-        mode_label = QLabel("Import Mode:")
-        mode_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        options_layout.addWidget(mode_label)
-        
-        self.create_new_radio = QRadioButton("🆕 Create new table")
-        self.create_new_radio.setChecked(True)
-        self.create_new_radio.setToolTip("Create a new table with combined data from all files")
-        
-        self.append_radio = QRadioButton("➕ Append to existing table")
-        self.append_radio.setToolTip("Add combined data to existing table")
-        
-        self.replace_radio = QRadioButton("🔄 Replace existing table")
-        self.replace_radio.setToolTip("Replace existing table with combined data")
-        
-        options_layout.addWidget(self.create_new_radio)
-        options_layout.addWidget(self.append_radio)
-        options_layout.addWidget(self.replace_radio)
-        
-        # Table selection dropdown (for append/replace modes)
-        self.table_select_widget = QWidget()
-        table_select_layout = QHBoxLayout(self.table_select_widget)
-        table_select_layout.setContentsMargins(0, 5, 0, 0)
-        table_select_layout.addWidget(QLabel("Select Table:"))
-        self.table_select_combo = QComboBox()
-        table_select_layout.addWidget(self.table_select_combo)
-        self.table_select_widget.hide()  # Initially hidden
-        options_layout.addWidget(self.table_select_widget)
-        
-        # Advanced options
-        advanced_label = QLabel("Advanced Options:")
-        advanced_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
-        options_layout.addWidget(advanced_label)
-        
-        self.add_filename_column = QCheckBox("Add filename column")
-        self.add_filename_column.setChecked(True)
-        self.add_filename_column.setToolTip("Add a column with the source filename for each row")
-        options_layout.addWidget(self.add_filename_column)
-        
-        self.recursive_scan = QCheckBox("Include subfolders")
-        self.recursive_scan.setChecked(False)
-        self.recursive_scan.setToolTip("Scan subfolders for files")
-        self.recursive_scan.stateChanged.connect(self.update_file_scan)
-        options_layout.addWidget(self.recursive_scan)
-        
-        layout.addWidget(options_group)
-        
-        # File-specific options
-        file_config_group = QGroupBox("File-Specific Options")
-        file_config_layout = QVBoxLayout(file_config_group)
-        
-        # CSV/TSV/TXT Options
-        self.csv_options_widget = QWidget()
-        csv_options_layout = QFormLayout(self.csv_options_widget)
-        
-        delimiter_layout = QHBoxLayout()
-        
-        # Delimiter dropdown with common options
-        self.delimiter_combo = QComboBox()
-        self.delimiter_combo.setMaximumWidth(120)
-        self.delimiter_combo.addItems([
-            "Comma (,)",
-            "Semicolon (;)", 
-            "Tab (\\t)",
-            "Pipe (|)",
-            "Space ( )",
-            "Custom..."
-        ])
-        self.delimiter_combo.setCurrentText("Comma (,)")
-        self.delimiter_combo.currentTextChanged.connect(self.on_delimiter_changed)
-        
-        # Custom delimiter input (initially hidden)
-        self.delimiter_edit = QLineEdit(",")
-        self.delimiter_edit.setMaximumWidth(60)
-        self.delimiter_edit.setPlaceholderText("Custom")
-        self.delimiter_edit.hide()
-        
-        self.auto_detect_folder_button = QPushButton("🔍 Auto")
-        self.auto_detect_folder_button.setMaximumWidth(60)
-        self.auto_detect_folder_button.setToolTip("Auto-detect delimiter from CSV files in folder")
-        self.auto_detect_folder_button.clicked.connect(self.auto_detect_folder_delimiter)
-        self.auto_detect_folder_button.setStyleSheet("""
-            QPushButton {
-                background-color: #17a2b8;
-                color: white;
-                border: none;
-                padding: 4px 8px;
-                border-radius: 3px;
-                font-size: 10px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #138496; }
-        """)
-        
-        delimiter_layout.addWidget(self.delimiter_combo)
-        delimiter_layout.addWidget(self.delimiter_edit)
-        delimiter_layout.addWidget(self.auto_detect_folder_button)
-        delimiter_layout.addStretch()
-        
-        csv_options_layout.addRow("Delimiter:", delimiter_layout)
-        
-        self.encoding_combo = QComboBox()
-        self.encoding_combo.addItems(["utf-8", "latin-1", "cp1252", "utf-16"])
-        csv_options_layout.addRow("Encoding:", self.encoding_combo)
-        
-        self.header_checkbox = QCheckBox("First row contains headers")
-        self.header_checkbox.setChecked(True)
-        csv_options_layout.addRow("", self.header_checkbox)
-        
-        file_config_layout.addWidget(QLabel("CSV/TSV/TXT Files:"))
-        file_config_layout.addWidget(self.csv_options_widget)
-        
-        # Excel Options
-        self.excel_options_widget = QWidget()
-        excel_options_layout = QFormLayout(self.excel_options_widget)
-        
-        self.sheet_behavior_combo = QComboBox()
-        self.sheet_behavior_combo.addItems([
-            "Import all sheets (combine)", 
-            "Import first sheet only", 
-            "Use specific sheet name for all files",
-            "Ask for each file"
-        ])
-        self.sheet_behavior_combo.setCurrentIndex(1)  # Default to first sheet
-        self.sheet_behavior_combo.currentTextChanged.connect(self.on_excel_mode_changed)
-        excel_options_layout.addRow("Sheet Handling:", self.sheet_behavior_combo)
-        
-        # Default sheet name selection (initially hidden)
-        self.sheet_name_label = QLabel("Default Sheet Name:")
-        
-        # Create a horizontal layout for the sheet selection
-        sheet_selection_widget = QWidget()
-        sheet_selection_layout = QHBoxLayout(sheet_selection_widget)
-        sheet_selection_layout.setContentsMargins(0, 0, 0, 0)
-        
-        self.sheet_name_combo = QComboBox()
-        self.sheet_name_combo.setEditable(True)  # Allow custom input
-        self.sheet_name_combo.setToolTip("Select a sheet name from the first Excel file, or type a custom name")
-        
-        self.refresh_sheets_button = QPushButton("🔄")
-        self.refresh_sheets_button.setMaximumWidth(30)
-        self.refresh_sheets_button.setToolTip("Refresh sheet list from first Excel file")
-        self.refresh_sheets_button.clicked.connect(self.refresh_excel_sheets)
-        
-        sheet_selection_layout.addWidget(self.sheet_name_combo)
-        sheet_selection_layout.addWidget(self.refresh_sheets_button)
-        
-        # Initially hide both label and input
-        self.sheet_name_label.hide()
-        sheet_selection_widget.hide()
-        self.sheet_selection_widget = sheet_selection_widget  # Store reference
-        
-        excel_options_layout.addRow(self.sheet_name_label, sheet_selection_widget)
-        
-        file_config_layout.addWidget(QLabel("Excel Files:"))
-        file_config_layout.addWidget(self.excel_options_widget)
-        
-        # JSON Options
-        self.json_options_widget = QWidget()
-        json_options_layout = QFormLayout(self.json_options_widget)
-        
-        self.json_normalize_checkbox = QCheckBox("Normalize nested JSON")
-        self.json_normalize_checkbox.setChecked(True)
-        self.json_normalize_checkbox.setToolTip("Flatten nested JSON objects into columns")
-        json_options_layout.addRow("", self.json_normalize_checkbox)
-        
-        file_config_layout.addWidget(QLabel("JSON Files:"))
-        file_config_layout.addWidget(self.json_options_widget)
-        
-        layout.addWidget(file_config_group)
-        
-        # Buttons
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        
-        self.cancel_button = QPushButton("❌ Cancel")
-        self.cancel_button.clicked.connect(self.reject)
-        self.cancel_button.setStyleSheet("""
-            QPushButton {
-                background-color: #6c757d;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #5a6268; }
-        """)
-        
-        self.import_button = QPushButton("📥 Import Folder")
-        self.import_button.clicked.connect(self.accept)
-        self.import_button.setEnabled(False)
-        self.import_button.setStyleSheet("""
-            QPushButton {
-                background-color: #28a745;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover { background-color: #218838; }
-            QPushButton:disabled { background-color: #6c757d; opacity: 0.6; }
-        """)
-        
-        button_layout.addWidget(self.cancel_button)
-        button_layout.addWidget(self.import_button)
-        layout.addLayout(button_layout)
-        
-        # Set the content widget to the scroll area
-        scroll_area.setWidget(content_widget)
-        
-        # Add scroll area to main layout
-        main_layout.addWidget(scroll_area)
-        
-        # Connect signals
-        self.folder_path_edit.textChanged.connect(self.update_ui)
-        self.table_name_edit.textChanged.connect(self.update_ui)
-        self.table_select_combo.currentTextChanged.connect(self.update_ui)
-        
-        # Connect radio button signals
-        self.create_new_radio.toggled.connect(self.update_table_selection_ui)
-        self.append_radio.toggled.connect(self.update_table_selection_ui)
-        self.replace_radio.toggled.connect(self.update_table_selection_ui)
-        
-        # Load existing tables
-        self.load_existing_tables()
-    
-    def on_delimiter_changed(self):
-        """Handle delimiter dropdown selection change"""
-        selected = self.delimiter_combo.currentText()
-        
-        if selected == "Custom...":
-            # Show custom input field
-            self.delimiter_edit.show()
-            self.delimiter_edit.setFocus()
-        else:
-            # Hide custom input and set predefined delimiter
-            self.delimiter_edit.hide()
-            
-            # Map display text to actual delimiter
-            delimiter_map = {
-                "Comma (,)": ",",
-                "Semicolon (;)": ";",
-                "Tab (\\t)": "\t",
-                "Pipe (|)": "|",
-                "Space ( )": " "
-            }
-            
-            actual_delimiter = delimiter_map.get(selected, ",")
-            self.delimiter_edit.setText(actual_delimiter)
-    
-    def get_current_delimiter(self):
-        """Get the currently selected delimiter value"""
-        if self.delimiter_combo.currentText() == "Custom...":
-            return self.delimiter_edit.text()
-        else:
-            delimiter_map = {
-                "Comma (,)": ",",
-                "Semicolon (;)": ";",
-                "Tab (\\t)": "\t",
-                "Pipe (|)": "|",
-                "Space ( )": " "
-            }
-            return delimiter_map.get(self.delimiter_combo.currentText(), ",")
-    
-    def auto_detect_folder_delimiter(self):
-        """Auto-detect delimiter from CSV files in the selected folder"""
-        if not self.found_files:
-            QMessageBox.warning(self, "No Files", "Please select a folder and scan for files first.")
-            return
-        
-        # Find CSV/TSV/TXT files in the found files
-        csv_files = [f for f in self.found_files if f.lower().endswith(('.csv', '.txt', '.tsv'))]
-        
-        if not csv_files:
-            QMessageBox.information(self, "No CSV Files", "No CSV, TSV, or TXT files found in the selected folder.")
-            return
-        
-        # Get the main app instance to use its detect_csv_delimiter method
-        main_app = self.parent()
-        while main_app and not hasattr(main_app, 'detect_csv_delimiter'):
-            main_app = main_app.parent()
-        
-        if not main_app or not hasattr(main_app, 'detect_csv_delimiter'):
-            QMessageBox.warning(self, "Error", "Could not access delimiter detection functionality.")
-            return
-        
-        # Try to detect delimiter from the first few CSV files
-        delimiter_counts = {}
-        files_checked = 0
-        
-        for file_path in csv_files[:5]:  # Check first 5 CSV files
-            try:
-                detected_delimiter = main_app.detect_csv_delimiter(file_path)
-                delimiter_counts[detected_delimiter] = delimiter_counts.get(detected_delimiter, 0) + 1
-                files_checked += 1
-            except Exception as e:
-                print(f"Error detecting delimiter for {file_path}: {e}")
-                continue
-        
-        if not delimiter_counts:
-            QMessageBox.warning(self, "Detection Failed", "Could not detect delimiter from any CSV files.")
-            return
-        
-        # Choose the most common delimiter
-        best_delimiter = max(delimiter_counts, key=delimiter_counts.get)
-        
-        # Map detected delimiter to dropdown option
-        delimiter_to_combo = {
-            ',': "Comma (,)",
-            ';': "Semicolon (;)",
-            '\t': "Tab (\\t)",
-            '|': "Pipe (|)",
-            ' ': "Space ( )"
-        }
-        
-        combo_option = delimiter_to_combo.get(best_delimiter)
-        
-        if combo_option:
-            # Set the dropdown to the detected delimiter
-            self.delimiter_combo.setCurrentText(combo_option)
-            self.delimiter_edit.hide()  # Hide custom input
-        else:
-            # Use custom option for unusual delimiters
-            self.delimiter_combo.setCurrentText("Custom...")
-            self.delimiter_edit.setText(best_delimiter)
-            self.delimiter_edit.show()
-        
-        # Show confirmation
-        delimiter_name = {
-            ',': 'comma',
-            ';': 'semicolon', 
-            '\t': 'tab',
-            '|': 'pipe',
-            ' ': 'space'
-        }.get(best_delimiter, f"'{best_delimiter}'")
-        
-        QMessageBox.information(self, "Delimiter Detected", 
-                              f"Detected delimiter: {delimiter_name}\n"
-                              f"Based on {files_checked} CSV file(s)")
-    
-    def on_excel_mode_changed(self):
-        """Show/hide the default sheet name input based on Excel mode selection"""
-        current_mode = self.sheet_behavior_combo.currentText()
-        
-        if "Use specific sheet name" in current_mode:
-            # Show the default sheet name selection and label
-            self.sheet_name_label.show()
-            self.sheet_selection_widget.show()
-            # Auto-refresh sheets when first shown
-            self.refresh_excel_sheets()
-        else:
-            # Hide the default sheet name selection and label
-            self.sheet_name_label.hide()
-            self.sheet_selection_widget.hide()
-    
-    def refresh_excel_sheets(self):
-        """Refresh the sheet names dropdown from the first Excel file found"""
-        try:
-            # Clear existing items
-            self.sheet_name_combo.clear()
-            
-            # Find first Excel file in the current file list
-            first_excel_file = None
-            for file_path in self.found_files:
-                if file_path.lower().endswith(('.xlsx', '.xls')):
-                    first_excel_file = file_path
-                    break
-            
-            if not first_excel_file:
-                # No Excel files found, add default options
-                self.sheet_name_combo.addItems(['Sheet1', 'Data', 'Sheet'])
-                self.sheet_name_combo.setCurrentText('Sheet1')
-                return
-            
-            # Try to read sheet names from the first Excel file
-            try:
-                import pandas as pd
-                excel_file = pd.ExcelFile(first_excel_file)
-                sheet_names = excel_file.sheet_names
-                
-                if sheet_names:
-                    self.sheet_name_combo.addItems(sheet_names)
-                    self.sheet_name_combo.setCurrentText(sheet_names[0])  # Select first sheet by default
-                    
-                    # Update tooltip with file info
-                    file_name = os.path.basename(first_excel_file)
-                    self.sheet_name_combo.setToolTip(f"Sheet names from: {file_name}\nSelect a sheet or type a custom name")
-                else:
-                    # File has no sheets, add defaults
-                    self.sheet_name_combo.addItems(['Sheet1', 'Data', 'Sheet'])
-                    self.sheet_name_combo.setCurrentText('Sheet1')
-                    
-            except Exception as e:
-                # Error reading Excel file, add default options
-                self.sheet_name_combo.addItems(['Sheet1', 'Data', 'Sheet'])
-                self.sheet_name_combo.setCurrentText('Sheet1')
-                print(f"Could not read sheets from {first_excel_file}: {e}")
-                
-        except Exception as e:
-            # General error, add default options
-            self.sheet_name_combo.addItems(['Sheet1', 'Data', 'Sheet'])
-            self.sheet_name_combo.setCurrentText('Sheet1')
-            print(f"Error refreshing Excel sheets: {e}")
-    
-    def browse_folder(self):
-        folder_path = QFileDialog.getExistingDirectory(
-            self,
-            "Select Folder Containing Data Files",
-            "",
-            QFileDialog.Option.ShowDirsOnly
-        )
-        
-        if folder_path:
-            self.folder_path_edit.setText(folder_path)
-            self.analyze_folder(folder_path)
-    
-    def analyze_folder(self, folder_path):
-        try:
-            # Auto-suggest table name only if field is empty
-            if not self.table_name_edit.text().strip():
-                folder_name = os.path.basename(folder_path)
-                # Clean table name (remove special characters, replace with underscores)
-                clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', folder_name).lower()
-                if clean_name:
-                    self.table_name_edit.setText(clean_name)
-                else:
-                    self.table_name_edit.setText("folder_import")
-            
-            self.update_file_scan()
-            
-        except Exception as e:
-            self.folder_info_label.setText(f"Error analyzing folder: {str(e)}")
-    
-    def update_file_scan(self):
-        folder_path = self.folder_path_edit.text()
-        if not folder_path or not os.path.exists(folder_path):
-            self.found_files = []
-            self.files_list.clear()
-            self.folder_info_label.setText("No folder selected")
-            self.files_info_label.setText("No files found")
-            return
-        
-        try:
-            # Get selected file types
-            selected_extensions = []
-            for ext, checkbox in self.file_type_checkboxes.items():
-                if checkbox.isChecked():
-                    if ext == "xlsx":
-                        selected_extensions.extend([".xlsx", ".xls"])
-                    else:
-                        selected_extensions.append(f".{ext}")
-            
-            # Auto-update delimiter for TSV files
-            if self.file_type_checkboxes.get("tsv", QCheckBox()).isChecked():
-                if self.delimiter_combo.currentText() == "Comma (,)":
-                    self.delimiter_combo.setCurrentText("Tab (\\t)")
-                    self.delimiter_edit.hide()
-            
-            # Scan folder for files
-            self.found_files = []
-            if self.recursive_scan.isChecked():
-                # Recursive scan
-                for root, dirs, files in os.walk(folder_path):
-                    for file in files:
-                        if any(file.lower().endswith(ext) for ext in selected_extensions):
-                            self.found_files.append(os.path.join(root, file))
-            else:
-                # Non-recursive scan
-                for file in os.listdir(folder_path):
-                    file_path = os.path.join(folder_path, file)
-                    if os.path.isfile(file_path) and any(file.lower().endswith(ext) for ext in selected_extensions):
-                        self.found_files.append(file_path)
-            
-            # Update UI
-            self.files_list.clear()
-            total_size = 0
-            for file_path in self.found_files:
-                try:
-                    file_size = os.path.getsize(file_path)
-                    total_size += file_size
-                    file_info = f"{os.path.basename(file_path)} ({file_size / 1024 / 1024:.2f} MB)"
-                    self.files_list.addItem(file_info)
-                except:
-                    self.files_list.addItem(os.path.basename(file_path))
-            
-            # Update info labels
-            if self.found_files:
-                self.folder_info_label.setText(f"Folder: {os.path.basename(folder_path)} | Found {len(self.found_files)} files | Total size: {total_size / 1024 / 1024:.2f} MB")
-                self.files_info_label.setText(f"{len(self.found_files)} files found")
-                
-                # Auto-refresh Excel sheets if the specific sheet option is selected
-                if "Use specific sheet name" in self.sheet_behavior_combo.currentText():
-                    self.refresh_excel_sheets()
-            else:
-                self.folder_info_label.setText(f"Folder: {os.path.basename(folder_path)} | No supported files found")
-                self.files_info_label.setText("No files found with selected file types")
-            
-        except Exception as e:
-            self.folder_info_label.setText(f"Error scanning folder: {str(e)}")
-            self.files_info_label.setText("Error scanning files")
-    
-    def load_existing_tables(self):
-        """Load existing tables from the database into the dropdown"""
-        self.table_select_combo.clear()
-        
-        if not self.connection or not self.connection_info:
-            return
-            
-        try:
-            if self.connection_info['type'].lower() == 'duckdb':
-                tables_df = self.connection.execute("SHOW TABLES").fetchdf()
-                existing_tables = tables_df['name'].tolist() if not tables_df.empty else []
-            else:  # SQLite
-                cursor = self.connection.cursor()
-                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-                existing_tables = [row[0] for row in cursor.fetchall()]
-            
-            if existing_tables:
-                for table in existing_tables:
-                    self.table_select_combo.addItem(f"📊 {table}")
-            else:
-                self.table_select_combo.addItem("(No tables found)")
-                self.table_select_combo.setEnabled(False)
-                
-        except Exception as e:
-            self.table_select_combo.addItem(f"Error loading tables: {str(e)}")
-            self.table_select_combo.setEnabled(False)
-    
-    def update_table_selection_ui(self):
-        """Update the table selection UI based on the selected import mode"""
-        if self.create_new_radio.isChecked():
-            self.table_select_widget.hide()
-        else:  # append or replace mode
-            self.table_select_widget.show()
-        self.update_ui()
-    
-    def update_ui(self):
-        # Enable import button only if folder, files, and appropriate table selection are provided
-        has_folder = bool(self.folder_path_edit.text().strip())
-        has_files = len(self.found_files) > 0
-        
-        # Check if any file types are selected
-        has_file_types = any(checkbox.isChecked() for checkbox in self.file_type_checkboxes.values())
-        
-        if self.create_new_radio.isChecked():
-            has_table_info = bool(self.table_name_edit.text().strip())
-        else:  # append or replace mode
-            current_text = self.table_select_combo.currentText()
-            has_table_info = (current_text and 
-                            current_text != "(No tables found)" and
-                            not current_text.startswith("Error") and
-                            current_text.startswith("📊 "))
-        
-        # Check if Excel files are selected and if default sheet name is required
-        has_excel_files = self.file_type_checkboxes.get("xlsx", QCheckBox()).isChecked()
-        excel_sheet_behavior = self.sheet_behavior_combo.currentText()
-        needs_sheet_name = has_excel_files and "Use specific sheet name" in excel_sheet_behavior
-        has_sheet_name = bool(self.sheet_name_combo.currentText().strip()) if needs_sheet_name else True
-        
-        # Update button state and tooltip
-        can_import = has_folder and has_files and has_table_info and has_file_types and has_sheet_name
-        self.import_button.setEnabled(can_import)
-        
-        # Update button tooltip with helpful information
-        if not has_folder:
-            self.import_button.setToolTip("Please select a folder first")
-        elif not has_file_types:
-            self.import_button.setToolTip("Please select at least one file type to import")
-        elif not has_files:
-            self.import_button.setToolTip("No files found with selected types in the folder")
-        elif not has_table_info:
-            if self.create_new_radio.isChecked():
-                self.import_button.setToolTip("Please enter a table name")
-            else:
-                self.import_button.setToolTip("Please select an existing table")
-        elif not has_sheet_name:
-            self.import_button.setToolTip("Please enter a default sheet name for Excel files")
-        else:
-            self.import_button.setToolTip(f"Ready to import {len(self.found_files)} files")
-    
-    def get_import_info(self):
-        # Get table name based on mode
-        if self.create_new_radio.isChecked():
-            table_name = self.table_name_edit.text().strip()
-        else:  # append or replace mode
-            table_name = self.table_select_combo.currentText()
-            # Remove icon prefix if present
-            if table_name.startswith("📊 "):
-                table_name = table_name[2:]  # Remove "📊 " prefix
-        
-        import_info = {
-            'folder_path': self.folder_path_edit.text(),
-            'file_paths': self.found_files.copy(),
-            'table_name': table_name,
-            'mode': 'create' if self.create_new_radio.isChecked() else 
-                   'append' if self.append_radio.isChecked() else 'replace',
-            'add_filename_column': self.add_filename_column.isChecked(),
-            'recursive_scan': self.recursive_scan.isChecked(),
-            # File-specific options
-            'csv_delimiter': self.get_current_delimiter(),
-            'csv_encoding': self.encoding_combo.currentText(),
-            'csv_header': self.header_checkbox.isChecked(),
-            'excel_sheet_behavior': self.sheet_behavior_combo.currentText(),
-            'excel_default_sheet': self.sheet_name_combo.currentText().strip(),
-            'json_normalize': self.json_normalize_checkbox.isChecked()
-        }
-        
-        return import_info
-
-
-# Tab widget for query editors
 class QueryTab(QWidget):
     schema_changed = pyqtSignal()  # Signal to notify when schema might have changed
     
@@ -2344,6 +1598,111 @@ class QueryTab(QWidget):
         # Editor header with fullscreen button
         self.editor_header = QWidget()
         self.editor_header_layout = QHBoxLayout(self.editor_header)
+        self.editor_header_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.editor_label = QLabel("Query Editor")
+        self.editor_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        
+        self.fullscreen_button = QPushButton("⛶")
+        self.fullscreen_button.setMaximumSize(30, 25)
+        self.fullscreen_button.setToolTip("Toggle fullscreen editor (F11)")
+        self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
+        self.fullscreen_button.setStyleSheet("""
+            QPushButton {
+                background-color: #404040;
+                color: #ffffff;
+                border: 1px solid #606060;
+                border-radius: 3px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #505050;
+                border-color: #0078d4;
+            }
+            QPushButton:pressed {
+                background-color: #0078d4;
+            }
+        """)
+        
+        self.editor_header_layout.addWidget(self.editor_label)
+        self.editor_header_layout.addStretch()
+        self.editor_header_layout.addWidget(self.fullscreen_button)
+        
+        # Results header
+        self.results_header = QWidget()
+        self.results_header_layout = QHBoxLayout(self.results_header)
+        self.results_header_layout.setContentsMargins(5, 5, 5, 5)
+        
+        self.results_label = QLabel("Results")
+        self.results_label.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self.results_info = QLabel("")
+        
+        # Export button
+        self.export_button = QPushButton("📤 Export")
+        self.export_button.setMaximumSize(80, 25)
+        self.export_button.setToolTip("Export results to file")
+        self.export_button.setEnabled(False)  # Initially disabled
+        self.export_button.clicked.connect(self.show_export_menu)
+        self.export_button.setStyleSheet("""
+            QPushButton {
+                background-color: #0078d4;
+                color: #ffffff;
+                border: 1px solid #106ebe;
+                border-radius: 3px;
+                font-weight: bold;
+                padding: 2px 8px;
+            }
+            QPushButton:hover {
+                background-color: #106ebe;
+                border-color: #005a9e;
+            }
+            QPushButton:pressed {
+                background-color: #005a9e;
+            }
+            QPushButton:disabled {
+                background-color: #404040;
+                color: #808080;
+                border-color: #606060;
+            }
+        """)
+        
+        self.results_header_layout.addWidget(self.results_label)
+        self.results_header_layout.addWidget(self.results_info, 1)
+        self.results_header_layout.addWidget(self.export_button)
+        
+        # Results table
+        self.results_table = QTableView()
+        self.results_table.setAlternatingRowColors(True)
+        self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.results_table.horizontalHeader().setStretchLastSection(True)
+        self.results_table.verticalHeader().setVisible(True)
+        self.results_table.setSortingEnabled(True)
+        
+        # Set table colors
+        table_palette = self.results_table.palette()
+        table_palette.setColor(QPalette.ColorRole.Base, QColor(55, 55, 55))
+        table_palette.setColor(QPalette.ColorRole.AlternateBase, QColor(45, 45, 45))
+        table_palette.setColor(QPalette.ColorRole.Text, ColorScheme.TEXT)
+        self.results_table.setPalette(table_palette)
+        
+        # Create editor container with header
+        self.editor_container = QWidget()
+        self.editor_container_layout = QVBoxLayout(self.editor_container)
+        self.editor_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.editor_container_layout.addWidget(self.editor_header)
+        self.editor_container_layout.addWidget(self.editor)
+        
+        # Add widgets to layouts
+        self.results_layout.addWidget(self.results_header)
+        self.results_layout.addWidget(self.results_table)
+        
+        self.splitter.addWidget(self.editor_container)
+        self.splitter.addWidget(self.results_widget)
+        self.splitter.setSizes([200, 300])
+        
+        self.layout.addWidget(self.splitter)
+    
+    def execute_query(self):
         self.editor_header_layout.setContentsMargins(5, 5, 5, 5)
         
         self.editor_label = QLabel("Query Editor")
@@ -3664,15 +3023,6 @@ class SQLEditorApp(QMainWindow):
         self.import_data_button.setToolTip("Import data from CSV, Excel, Parquet, JSON files")
         self.import_data_button.clicked.connect(self.show_import_dialog)
         self.toolbar.addWidget(self.import_data_button)
-        
-        # Folder Import button
-        self.folder_import_button = QToolButton()
-        self.folder_import_button.setIcon(qta.icon('fa5s.folder', color=ColorScheme.ACCENT))
-        self.folder_import_button.setText("Import Folder")
-        self.folder_import_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.folder_import_button.setToolTip("Import and combine all files from a folder")
-        self.folder_import_button.clicked.connect(self.show_folder_import_dialog)
-        self.toolbar.addWidget(self.folder_import_button)
     
     def create_actions(self):
         # File actions
@@ -3711,10 +3061,6 @@ class SQLEditorApp(QMainWindow):
         self.import_data_action = QAction(qta.icon('fa5s.file-import', color=ColorScheme.SUCCESS), "&Import Data...", self)
         self.import_data_action.setShortcut("Ctrl+I")
         self.import_data_action.triggered.connect(self.show_import_dialog)
-        
-        self.folder_import_action = QAction(qta.icon('fa5s.folder', color=ColorScheme.ACCENT), "Import &Folder...", self)
-        self.folder_import_action.setShortcut("Ctrl+Shift+I")
-        self.folder_import_action.triggered.connect(self.show_folder_import_dialog)
         
         # Query actions
         self.execute_action = QAction(qta.icon('fa5s.play', color=ColorScheme.SUCCESS), "&Execute Query", self)
@@ -3760,7 +3106,6 @@ class SQLEditorApp(QMainWindow):
         self.db_menu.addAction(self.disconnect_action)
         self.db_menu.addSeparator()
         self.db_menu.addAction(self.import_data_action)
-        self.db_menu.addAction(self.folder_import_action)
         
         # Query menu
         self.query_menu = self.menuBar().addMenu("&Query")
@@ -3818,48 +3163,16 @@ class SQLEditorApp(QMainWindow):
                     return  # User cancelled or didn't provide a name
             
             # For append and replace modes, table name is already selected from dropdown
-            self.start_import_worker(import_info, is_folder=False)
+            self.start_import_worker(import_info)
     
-    def show_folder_import_dialog(self):
-        if not self.current_connection:
-            QMessageBox.warning(self, "No Connection", "Please connect to a database first.")
-            return
-        
-        try:
-            dialog = FolderImportDialog(self, self.current_connection, self.current_connection_info)
-            result = dialog.exec()
-            
-            if result == QDialog.DialogCode.Accepted:
-                folder_import_info = dialog.get_import_info()
-                
-                # Validate that we have the required information
-                if not folder_import_info or not folder_import_info.get('file_paths'):
-                    QMessageBox.warning(self, "Import Error", "No files selected for import.")
-                    return
-                
-                # For create mode, still ask for table name confirmation
-                if folder_import_info['mode'] == 'create':
-                    suggested_name = folder_import_info['table_name'] or "folder_import"
-                    table_name = self.show_table_name_dialog(suggested_name, folder_import_info['folder_path'], 'create')
-                    if table_name:
-                        folder_import_info['table_name'] = table_name
-                    else:
-                        return  # User cancelled or didn't provide a name
-                
-                # Import the folder
-                self.start_import_worker(folder_import_info, is_folder=True)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Dialog Error", f"Error opening folder import dialog:\n{str(e)}")
-    
-    def start_import_worker(self, import_info, is_folder=False):
+
+    def start_import_worker(self, import_info):
         """Start the import worker thread with progress dialog"""
         # Create and show progress dialog
-        title = "Importing Folder..." if is_folder else "Importing File..."
-        self.progress_dialog = ProgressDialog(self, title)
+        self.progress_dialog = ProgressDialog(self, "Importing File...")
         
         # Create and start worker thread
-        self.import_worker = ImportWorker(self, import_info, is_folder)
+        self.import_worker = ImportWorker(self, import_info)
         
         # Connect worker signals
         self.import_worker.progress.connect(self.progress_dialog.update_progress)
@@ -4136,165 +3449,990 @@ class SQLEditorApp(QMainWindow):
             self.statusBar().showMessage("Disconnected from database", 3000)
     
     def import_data(self, import_info):
-        """Import data from file to database with bulletproof error handling"""
-        file_path = None
+        """NEW: Completely rebuilt import system with guaranteed UI responsiveness"""
         try:
-            file_path = import_info['file_path']
-            table_name = import_info['table_name']
-            file_type = import_info['file_type']
-            mode = import_info['mode']
-            
-            # Show progress
-            self.statusBar().showMessage(f"Importing {os.path.basename(file_path)}...")
-            
-            # Load data based on file type with robust error handling
-            df = self.safe_load_data(file_path, file_type, import_info)
-            
-            if df is None or df.empty:
-                QMessageBox.warning(self, "Import Error", "No data found in the file or file could not be read.")
-                return
-            
-            # Report original data info
-            original_rows, original_cols = df.shape
-            self.statusBar().showMessage(f"Processing {original_rows:,} rows × {original_cols} columns...")
-            
-            # Handle duplicate columns
-            df = self.handle_duplicate_columns(df)
-            
-            # Clean column names for database compatibility
-            df.columns = [self.clean_column_name(col) for col in df.columns]
-            
-            # Ensure unique table name
-            safe_table_name = self.ensure_unique_table_name(table_name, mode)
-            
-            # Validate data before import
-            errors, warnings = self.validate_import_data(df, safe_table_name, mode)
-            
-            # Show validation results if any
-            if errors:
-                error_msg = "Cannot proceed with import:\n\n" + "\n".join(f"• {error}" for error in errors)
-                QMessageBox.critical(self, "Import Validation Failed", error_msg)
-                return
-            
-            if warnings:
-                warning_msg = "Import warnings:\n\n" + "\n".join(f"• {warning}" for warning in warnings)
-                warning_msg += "\n\nDo you want to continue with the import?"
-                
-                reply = QMessageBox.question(
-                    self, "Import Warnings", warning_msg,
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.Yes
-                )
-                
-                if reply == QMessageBox.StandardButton.No:
-                    return
-            
-            # Sanitize all data to prevent import errors
-            df = self.sanitize_dataframe(df)
-            
-            # Handle import mode
-            if mode == 'replace':
-                # Drop table if exists
-                try:
-                    if self.current_connection_info['type'].lower() == 'duckdb':
-                        self.current_connection.execute(f"DROP TABLE IF EXISTS {safe_table_name}")
-                    else:  # SQLite
-                        self.current_connection.execute(f"DROP TABLE IF EXISTS {safe_table_name}")
-                        self.current_connection.commit()
-                except:
-                    pass  # Table might not exist
-            
-            # Import data to database with bulletproof error handling
-            success = self.safe_import_to_database(df, safe_table_name, mode)
-            
-            if success:
-                # Update schema browser immediately
-                self.refresh_schema_browser()
-                
-                # Show success message
-                rows, cols = df.shape
-                mode_text = {
-                    'create': 'created',
-                    'append': 'appended to',
-                    'replace': 'replaced'
-                }[mode]
-                
-                # Show success message with any name changes
-                success_msg = f"Successfully {mode_text} table '{safe_table_name}'!\n\n"
-                success_msg += f"📊 {rows:,} rows × {cols} columns imported\n"
-                success_msg += f"📁 Source: {os.path.basename(file_path)}\n\n"
-                success_msg += f"✅ All data was automatically converted to compatible formats"
-                
-                if safe_table_name != table_name:
-                    success_msg += f"\n\n⚠️ Table name was changed from '{table_name}' to '{safe_table_name}' to ensure uniqueness."
-                
-                QMessageBox.information(self, "Import Successful", success_msg)
-                
-                self.statusBar().showMessage(f"Import completed: {rows:,} rows imported to '{safe_table_name}'", 5000)
-                
-                # Add a query to the current tab to show the imported data
-                current_tab = self.tab_widget.currentWidget()
-                if current_tab and not current_tab.editor.toPlainText().strip():
-                    current_tab.editor.setPlainText(f"SELECT * FROM {safe_table_name} LIMIT 100;")
-            else:
-                QMessageBox.warning(self, "Import Warning", "Import completed but some issues were encountered. Data was converted to text format for compatibility.")
-            
+            # Always use the worker-based import for UI responsiveness
+            self.start_import_worker(import_info, is_folder=False)
         except Exception as e:
-            error_msg = str(e)
-            if file_path:
-                file_info = f" (File: {os.path.basename(file_path)})"
-            else:
-                file_info = ""
-            
-            # Show user-friendly error messages
-            if "permission denied" in error_msg.lower():
-                user_msg = f"Cannot access the file{file_info}. Please check if:\n• The file is open in another program\n• You have permission to read the file\n• The file path is correct"
-            elif "encoding" in error_msg.lower() or "codec" in error_msg.lower():
-                user_msg = f"File encoding issue{file_info}. Try selecting a different encoding (utf-8, latin-1, cp1252)"
-            elif "memory" in error_msg.lower():
-                user_msg = f"File is too large to import{file_info}. Try importing a smaller file or contact support"
-            elif "connection" in error_msg.lower():
-                user_msg = "Database connection error. Please reconnect to the database and try again"
-            else:
-                user_msg = f"Import failed{file_info}.\n\nTechnical details: {error_msg}"
-            
-            QMessageBox.critical(self, "Import Error", user_msg)
-            self.statusBar().showMessage(f"Import failed: {error_msg}", 5000)
+            QMessageBox.critical(self, "Import Error", f"Failed to start import: {str(e)}")
     
     def import_data_optimized(self, import_info, worker=None):
-        """Optimized import for large files with chunked processing"""
-        file_path = None
+        """NEW: Completely rebuilt optimized import with guaranteed UI responsiveness"""
+        try:
+            file_path = import_info['file_path']
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            
+            if worker:
+                worker.progress.emit(5, f"Starting import: {os.path.basename(file_path)} ({file_size_mb:.1f} MB)")
+            
+            # Use ultra-fast native import for maximum speed
+            return self.ultra_fast_native_import(import_info, worker)
+            
+        except Exception as e:
+            print(f"Import failed: {e}")
+            if worker:
+                worker.error.emit(f"Import failed: {str(e)}")
+            return False
+    
+    def ultra_fast_native_import(self, import_info, worker=None):
+        """ULTRA-FAST: Use native database import functions for maximum speed"""
         try:
             file_path = import_info['file_path']
             table_name = import_info['table_name']
             file_type = import_info['file_type']
             mode = import_info['mode']
             
+            # DEBUG: Log import details
+            print(f"\n=== IMPORT DEBUG INFO ===")
+            print(f"File: {os.path.basename(file_path)}")
+            print(f"Table: {table_name}")
+            print(f"Mode: {mode}")
+            print(f"File type: {file_type}")
+            
+            # Clean table name
+            safe_table_name = self.clean_table_name(table_name)
+            print(f"Safe table name: {safe_table_name}")
+            
             if worker:
-                worker.progress.emit(10, f"Analyzing file: {os.path.basename(file_path)}")
+                worker.progress.emit(5, "Initializing ultra-fast native import...")
             
-            # Get file size for optimization decisions
-            file_size = os.path.getsize(file_path)
-            file_size_mb = file_size / (1024 * 1024)
+            # Check database type
+            db_type = self.current_connection_info.get('type', '').lower()
+            print(f"  Database type: {db_type}")
             
-            print(f"Optimized import: {file_path} ({file_size_mb:.1f} MB) -> {table_name} (mode: {mode})")
-            
-            # For large files (>50MB), use chunked processing
-            if file_size_mb > 50:
-                return self.import_large_file_chunked(import_info, worker)
+            if db_type == 'duckdb':
+                print(f"  Using DuckDB native import for {file_type} in {mode} mode")
+                return self.duckdb_native_import(file_path, file_type, safe_table_name, mode, import_info, worker)
+            elif db_type == 'sqlite':
+                print(f"  Using SQLite native import for {file_type} in {mode} mode")
+                return self.sqlite_native_import(file_path, file_type, safe_table_name, mode, import_info, worker)
             else:
-                return self.import_small_file_fast(import_info, worker)
+                print(f"  Falling back to streaming import for {file_type} in {mode} mode")
+                # Fallback to streaming import
+                return self.streaming_import_with_progress(import_info, worker)
                 
         except Exception as e:
-            error_msg = str(e)
-            if file_path:
-                file_info = f" (File: {os.path.basename(file_path)})"
-            else:
-                file_info = ""
-            
-            print(f"Optimized import failed{file_info}: {error_msg}")
+            print(f"Ultra-fast native import failed: {e}")
             if worker:
-                worker.error.emit(f"Import failed{file_info}: {error_msg}")
+                worker.error.emit(f"Ultra-fast import failed: {str(e)}")
+            return False
+    
+    def duckdb_native_import(self, file_path, file_type, table_name, mode, import_info, worker=None):
+        """DuckDB native import - extremely fast for CSV/TSV/Parquet"""
+        try:
+            if worker:
+                worker.progress.emit(10, "Using DuckDB native import for maximum speed...")
+            
+            # Drop table if create or replace mode
+            if mode in ['create', 'replace']:
+                self.drop_table_if_exists(table_name)
+            
+            # Check if we need to add filename column for folder imports
+            add_filename_column = import_info.get('add_filename_column', False)
+            source_filename = import_info.get('source_filename', '')
+            
+            # Build native import SQL based on file type
+            if file_type in ['.csv', '.txt']:
+                delimiter = import_info.get('delimiter', ',')
+                encoding = import_info.get('encoding', 'utf-8')
+                has_header = import_info.get('header', True)
+                
+                if worker:
+                    worker.progress.emit(20, "Executing DuckDB native CSV import...")
+                
+                # DuckDB native CSV import with optional filename column
+                if add_filename_column and source_filename:
+                    base_select = f"SELECT *, '{source_filename}' AS _source_file FROM read_csv_auto("
+                else:
+                    base_select = "SELECT * FROM read_csv_auto("
+                
+                csv_params = f"""
+                    '{file_path}',
+                    delim='{delimiter}',
+                    header={str(has_header).lower()},
+                    all_varchar=true,
+                    ignore_errors=true,
+                    sample_size=100000
+                )"""
+                
+                # For create/replace mode, use CREATE TABLE AS (table was already dropped)
+                if mode in ['create', 'replace']:
+                    sql = f"""
+                    CREATE TABLE {table_name} AS 
+                    {base_select}{csv_params}
+                    """
+                else:  # append mode
+                    # For append mode, check and align columns first
+                    try:
+                        # Get existing table columns
+                        existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+                        existing_columns = [col[1] for col in existing_cols_result]
+                        
+                        # Read a sample to get new file columns
+                        sample_df = pd.read_csv(file_path, delimiter=delimiter, nrows=1, encoding=encoding, header=0 if has_header else None)
+                        if not has_header:
+                            sample_df.columns = [f'column_{i+1}' for i in range(len(sample_df.columns))]
+                        
+                        # Clean column names
+                        sample_df = self.ensure_valid_column_names(sample_df)
+                        new_columns = list(sample_df.columns)
+                        
+                        # Add missing columns to existing table
+                        for col in new_columns:
+                            if col not in existing_columns:
+                                self.current_connection.execute(f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT')
+                        
+                        # Create column mapping for INSERT
+                        column_list = ', '.join([f'"{col}"' for col in new_columns])
+                        sql = f"""
+                        INSERT INTO {table_name} ({column_list})
+                        {base_select}{csv_params}
+                        """
+                    except Exception as col_error:
+                        print(f"Column alignment failed, using flexible append: {col_error}")
+                        # Fallback to flexible append method
+                        sample_df = pd.read_csv(file_path, delimiter=delimiter, nrows=100, encoding=encoding, header=0 if has_header else None)
+                        if not has_header:
+                            sample_df.columns = [f'column_{i+1}' for i in range(len(sample_df.columns))]
+                        return self.flexible_append_data(sample_df, table_name, 'duckdb')
+                    
+            elif file_type == '.tsv':
+                has_header = import_info.get('header', True)
+                
+                if worker:
+                    worker.progress.emit(20, "Executing DuckDB native TSV import...")
+                
+                # TSV import with optional filename column
+                if add_filename_column and source_filename:
+                    base_select = f"SELECT *, '{source_filename}' AS _source_file FROM read_csv_auto("
+                else:
+                    base_select = "SELECT * FROM read_csv_auto("
+                
+                tsv_params = f"""
+                    '{file_path}',
+                    delim='\\t',
+                    header={str(has_header).lower()},
+                    all_varchar=true,
+                    ignore_errors=true,
+                    sample_size=100000
+                )"""
+                
+                # For create/replace mode, use CREATE TABLE AS (table was already dropped)
+                if mode in ['create', 'replace']:
+                    sql = f"""
+                    CREATE TABLE {table_name} AS 
+                    {base_select}{tsv_params}
+                    """
+                else:  # append mode
+                    # For append mode, check and align columns first
+                    try:
+                        # Get existing table columns
+                        existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+                        existing_columns = [col[1] for col in existing_cols_result]
+                        
+                        # Read a sample to get new file columns
+                        sample_df = pd.read_csv(file_path, delimiter='\t', nrows=1, header=0 if has_header else None)
+                        if not has_header:
+                            sample_df.columns = [f'column_{i+1}' for i in range(len(sample_df.columns))]
+                        
+                        # Clean column names
+                        sample_df = self.ensure_valid_column_names(sample_df)
+                        new_columns = list(sample_df.columns)
+                        
+                        # Add missing columns to existing table
+                        for col in new_columns:
+                            if col not in existing_columns:
+                                self.current_connection.execute(f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT')
+                        
+                        # Create column mapping for INSERT
+                        column_list = ', '.join([f'"{col}"' for col in new_columns])
+                        sql = f"""
+                        INSERT INTO {table_name} ({column_list})
+                        {base_select}{tsv_params}
+                        """
+                    except Exception as col_error:
+                        print(f"Column alignment failed, using flexible append: {col_error}")
+                        # Fallback to flexible append method
+                        sample_df = pd.read_csv(file_path, delimiter='\t', nrows=100, header=0 if has_header else None)
+                        if not has_header:
+                            sample_df.columns = [f'column_{i+1}' for i in range(len(sample_df.columns))]
+                        return self.flexible_append_data(sample_df, table_name, 'duckdb')
+                    
+            elif file_type == '.parquet':
+                if worker:
+                    worker.progress.emit(20, "Executing DuckDB native Parquet import...")
+                
+                # Enhanced parquet import with optional filename column
+                if add_filename_column and source_filename:
+                    base_select = f"SELECT *, '{source_filename}' AS _source_file FROM read_parquet('{file_path}')"
+                else:
+                    base_select = f"SELECT * FROM read_parquet('{file_path}')"
+                
+                # For create/replace mode, use CREATE TABLE AS (table was already dropped)
+                if mode in ['create', 'replace']:
+                    sql = f"""
+                    CREATE TABLE {table_name} AS 
+                    {base_select}
+                    """
+                else:  # append mode
+                    # For append mode, check and align columns first
+                    try:
+                        # Get existing table columns
+                        existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+                        existing_columns = [col[1] for col in existing_cols_result]
+                        
+                        # Read a sample to get new file columns
+                        sample_df = pd.read_parquet(file_path, nrows=1)
+                        
+                        # Clean column names
+                        sample_df = self.ensure_valid_column_names(sample_df)
+                        new_columns = list(sample_df.columns)
+                        
+                        # Add missing columns to existing table
+                        for col in new_columns:
+                            if col not in existing_columns:
+                                self.current_connection.execute(f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT')
+                        
+                        # Create column mapping for INSERT
+                        column_list = ', '.join([f'"{col}"' for col in new_columns])
+                        if add_filename_column and source_filename:
+                            base_select_with_cols = f"SELECT {column_list}, '{source_filename}' AS _source_file FROM read_parquet('{file_path}')"
+                        else:
+                            base_select_with_cols = f"SELECT {column_list} FROM read_parquet('{file_path}')"
+                        
+                        sql = f"""
+                        INSERT INTO {table_name} ({column_list}{', _source_file' if add_filename_column and source_filename else ''})
+                        {base_select_with_cols}
+                        """
+                    except Exception as col_error:
+                        print(f"Column alignment failed, using flexible append: {col_error}")
+                        # Fallback to flexible append method
+                        sample_df = pd.read_parquet(file_path, nrows=100)
+                        return self.flexible_append_data(sample_df, table_name, 'duckdb')
+                    
+            elif file_type == '.json':
+                if worker:
+                    worker.progress.emit(20, "Executing DuckDB native JSON import...")
+                
+                # Enhanced JSON import with optional filename column
+                if add_filename_column and source_filename:
+                    base_select = f"SELECT *, '{source_filename}' AS _source_file FROM read_json_auto('{file_path}')"
+                else:
+                    base_select = f"SELECT * FROM read_json_auto('{file_path}')"
+                
+                # For create/replace mode, use CREATE TABLE AS (table was already dropped)
+                if mode in ['create', 'replace']:
+                    sql = f"""
+                    CREATE TABLE {table_name} AS 
+                    {base_select}
+                    """
+                else:  # append mode
+                    # For append mode, check and align columns first
+                    try:
+                        # Get existing table columns
+                        existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+                        existing_columns = [col[1] for col in existing_cols_result]
+                        
+                        # Read a sample to get new file columns
+                        sample_df = pd.read_json(file_path, lines=True, nrows=1)
+                        
+                        # Clean column names
+                        sample_df = self.ensure_valid_column_names(sample_df)
+                        new_columns = list(sample_df.columns)
+                        
+                        # Add missing columns to existing table
+                        for col in new_columns:
+                            if col not in existing_columns:
+                                self.current_connection.execute(f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT')
+                        
+                        # Create column mapping for INSERT
+                        column_list = ', '.join([f'"{col}"' for col in new_columns])
+                        if add_filename_column and source_filename:
+                            base_select_with_cols = f"SELECT {column_list}, '{source_filename}' AS _source_file FROM read_json_auto('{file_path}')"
+                        else:
+                            base_select_with_cols = f"SELECT {column_list} FROM read_json_auto('{file_path}')"
+                        
+                        sql = f"""
+                        INSERT INTO {table_name} ({column_list}{', _source_file' if add_filename_column and source_filename else ''})
+                        {base_select_with_cols}
+                        """
+                    except Exception as col_error:
+                        print(f"Column alignment failed, using flexible append: {col_error}")
+                        # Fallback to flexible append method
+                        try:
+                            sample_df = pd.read_json(file_path, lines=True, nrows=100)
+                        except:
+                            sample_df = pd.read_json(file_path, nrows=100)
+                        return self.flexible_append_data(sample_df, table_name, 'duckdb')
+            elif file_type in ['.xlsx', '.xls']:
+                if worker:
+                    worker.progress.emit(20, "Using streamlined Excel import...")
+                
+                # Use the streamlined import approach like other files
+                return self.excel_streamlined_import(file_path, table_name, mode, import_info, worker)
+            else:
+                # Fallback for unsupported formats
+                return self.streaming_import_with_progress({'file_path': file_path, 'table_name': table_name, 'file_type': file_type, 'mode': mode}, worker)
+            
+            if worker:
+                worker.progress.emit(30, f"Executing ultra-fast {file_type.upper()} import...")
+                worker.progress.emit(35, "Processing file structure...")
+            
+            # Execute the native import with enhanced error handling
+            start_time = time.time()
+            try:
+                self.current_connection.execute(sql)
+                if worker:
+                    worker.progress.emit(70, "Import execution completed successfully...")
+            except Exception as sql_error:
+                if worker:
+                    worker.progress.emit(40, f"Native import failed, trying alternative method...")
+                print(f"Native SQL failed: {sql_error}")
+                # Try alternative reading approaches for different file types
+                if file_type == '.parquet':
+                    return self.parquet_fallback_import(file_path, table_name, mode, worker)
+                elif file_type == '.json':
+                    return self.json_fallback_import(file_path, table_name, mode, worker)
+                elif file_type in ['.xlsx', '.xls']:
+                    return self.excel_fallback_import(file_path, table_name, mode, import_info, worker)
+                else:
+                    raise sql_error
+            end_time = time.time()
+            
+            if worker:
+                worker.progress.emit(80, "Counting imported rows...")
+            
+            # Get row count
+            result = self.current_connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+            row_count = result[0] if result else 0
+            
+            import_time = end_time - start_time
+            speed = row_count / max(import_time, 0.001)
+            
+            if worker:
+                worker.progress.emit(90, f"Import completed: {row_count:,} rows in {import_time:.2f}s ({speed:,.0f} rows/sec)")
+            
+            # Refresh schema browser with error handling
+            try:
+                self.refresh_schema_browser()
+            except Exception as refresh_error:
+                print(f"Schema refresh warning: {refresh_error}")
+                # Import was successful, just refresh failed - continue
+            
+            print(f"Native import completed: {row_count:,} rows in {import_time:.2f}s ({speed:,.0f} rows/sec)")
+            return True
+            
+        except Exception as e:
+            print(f"DuckDB native import failed: {e}")
+            if worker:
+                worker.error.emit(f"DuckDB native import failed: {str(e)}")
+            return False
+    
+    def drop_table_if_exists(self, table_name):
+        """Helper to drop table if exists"""
+        try:
+            self.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+        except Exception as e:
+            print(f"Could not drop table {table_name}: {e}")
+    
+    def sqlite_native_import(self, file_path, file_type, table_name, mode, import_info, worker=None):
+        """SQLite native import fallback - uses CSV import for CSV files"""
+        try:
+            if worker:
+                worker.progress.emit(10, "Using SQLite optimized import...")
+            
+            # For SQLite, we'll use the streaming import as it doesn't have native CSV readers like DuckDB
+            return self.streaming_import_with_progress(import_info, worker)
+            
+        except Exception as e:
+            print(f"SQLite import failed: {e}")
+            if worker:
+                worker.error.emit(f"SQLite import failed: {str(e)}")
+            return False
+    
+    def streaming_import_with_progress(self, import_info, worker=None):
+        """Streaming import with progress for fallback cases"""
+        try:
+            if worker:
+                worker.progress.emit(10, "Using streaming import fallback...")
+            
+            # Use the existing optimized import functions
+            return self.import_small_file_fast(import_info, worker)
+            
+        except Exception as e:
+            print(f"Streaming import failed: {e}")
+            if worker:
+                worker.error.emit(f"Streaming import failed: {str(e)}")
+            return False
+    
+    def excel_fallback_import(self, file_path, table_name, mode, import_info, worker=None):
+        """Excel fallback import method with optimized chunked reading"""
+        try:
+            if worker:
+                worker.progress.emit(10, "Analyzing Excel file...")
+            
+            # Get file size to determine if we need chunked reading
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            
+            safe_table_name = self.ensure_unique_table_name(table_name, mode)
+            
+            # For large Excel files (>50MB), use chunked reading
+            if file_size_mb > 50:
+                return self.excel_chunked_import(file_path, safe_table_name, mode, import_info, worker)
+            else:
+                return self.excel_direct_import(file_path, safe_table_name, mode, import_info, worker)
+            
+        except Exception as e:
+            print(f"Excel fallback import failed: {e}")
+            if worker:
+                worker.error.emit(f"Excel import failed: {str(e)}")
+            return False
+    
+    def excel_direct_import(self, file_path, table_name, mode, import_info, worker=None):
+        """Direct Excel import for smaller files"""
+        try:
+            if worker:
+                worker.progress.emit(20, "Loading Excel file...")
+            
+            # Use optimized Excel reading
+            sheet_name = import_info.get('sheet_name', 0)
+            df = pd.read_excel(
+                file_path, 
+                sheet_name=sheet_name,
+                dtype=str,  # Read everything as string for consistency
+                na_filter=False,  # Don't convert to NaN
+                engine='openpyxl'
+            )
+            
+            if df is None or df.empty:
+                if worker:
+                    worker.error.emit("No data found in Excel file")
+                return False
+            
+            if worker:
+                worker.progress.emit(50, f"Processing {len(df):,} rows from Excel...")
+            
+            # Process and import
+            df = self.quick_process_dataframe(df)
+            
+            if worker:
+                worker.progress.emit(70, f"Inserting {len(df):,} rows into database...")
+            
+            return self.fast_database_insert(df, table_name, mode, worker)
+            
+        except Exception as e:
+            print(f"Excel direct import failed: {e}")
+            if worker:
+                worker.error.emit(f"Excel direct import failed: {str(e)}")
+            return False
+    
+    def excel_chunked_import(self, file_path, table_name, mode, import_info, worker=None):
+        """Chunked Excel import for large files"""
+        try:
+            if worker:
+                worker.progress.emit(15, "Reading Excel file in chunks...")
+            
+            sheet_name = import_info.get('sheet_name', 0)
+            
+            # Read Excel file to get total rows first
+            excel_file = pd.ExcelFile(file_path, engine='openpyxl')
+            
+            # Get sheet info
+            if isinstance(sheet_name, int):
+                actual_sheet = excel_file.sheet_names[sheet_name] if sheet_name < len(excel_file.sheet_names) else excel_file.sheet_names[0]
+            else:
+                actual_sheet = sheet_name if sheet_name in excel_file.sheet_names else excel_file.sheet_names[0]
+            
+            if worker:
+                worker.progress.emit(25, f"Processing Excel sheet: {actual_sheet}")
+            
+            # Read in chunks using pandas chunking
+            chunk_size = 10000  # Read 10k rows at a time
+            table_created = False
+            total_rows = 0
+            
+            # Use chunksize parameter if available (pandas 1.4+)
+            try:
+                chunk_reader = pd.read_excel(
+                    file_path,
+                    sheet_name=actual_sheet,
+                    chunksize=chunk_size,
+                    dtype=str,
+                    na_filter=False,
+                    engine='openpyxl'
+                )
+                
+                for chunk_num, chunk_df in enumerate(chunk_reader):
+                    if worker and worker.cancelled:
+                        return False
+                    
+                    if worker:
+                        progress = 30 + int((chunk_num * 50) / 100)  # Estimate progress
+                        worker.progress.emit(progress, f"Processing chunk {chunk_num + 1}: {len(chunk_df):,} rows")
+                    
+                    # Process chunk
+                    chunk_df = self.quick_process_dataframe(chunk_df)
+                    
+                    # Insert chunk
+                    if not table_created:
+                        success = self.fast_database_insert(chunk_df, table_name, mode, worker)
+                        table_created = True
+                    else:
+                        success = self.fast_database_insert(chunk_df, table_name, 'append', worker)
+                    
+                    if not success:
+                        if worker:
+                            worker.error.emit(f"Failed to insert chunk {chunk_num + 1}")
+                        return False
+                    
+                    total_rows += len(chunk_df)
+                    
+            except TypeError:
+                # Fallback for older pandas versions without chunksize support for Excel
+                if worker:
+                    worker.progress.emit(30, "Reading entire Excel file (chunked reading not supported)...")
+                
+                df = pd.read_excel(
+                    file_path,
+                    sheet_name=actual_sheet,
+                    dtype=str,
+                    na_filter=False,
+                    engine='openpyxl'
+                )
+                
+                if df is None or df.empty:
+                    if worker:
+                        worker.error.emit("No data found in Excel file")
+                    return False
+                
+                # Process in memory chunks
+                chunk_size = 50000
+                total_rows = len(df)
+                
+                for i in range(0, total_rows, chunk_size):
+                    if worker and worker.cancelled:
+                        return False
+                    
+                    chunk_df = df.iloc[i:i+chunk_size].copy()
+                    chunk_num = i // chunk_size
+                    
+                    if worker:
+                        progress = 40 + int((i / total_rows) * 50)
+                        worker.progress.emit(progress, f"Processing chunk {chunk_num + 1}: {len(chunk_df):,} rows")
+                    
+                    # Process chunk
+                    chunk_df = self.quick_process_dataframe(chunk_df)
+                    
+                    # Insert chunk
+                    if not table_created:
+                        success = self.fast_database_insert(chunk_df, table_name, mode, worker)
+                        table_created = True
+                    else:
+                        success = self.fast_database_insert(chunk_df, table_name, 'append', worker)
+                    
+                    if not success:
+                        if worker:
+                            worker.error.emit(f"Failed to insert chunk {chunk_num + 1}")
+                        return False
+            
+            if worker:
+                worker.progress.emit(90, f"Excel import completed: {total_rows:,} rows")
+            
+            # Refresh schema browser
+            self.refresh_schema_browser()
+            
+            print(f"Excel chunked import completed: {total_rows:,} rows imported to '{table_name}'")
+            return True
+            
+        except Exception as e:
+            print(f"Excel chunked import failed: {e}")
+            if worker:
+                worker.error.emit(f"Excel chunked import failed: {str(e)}")
+            return False
+    
+    def excel_streamlined_import(self, file_path, table_name, mode, import_info, worker=None):
+        """BLAZING-FAST Excel import - multi-engine optimization for maximum speed"""
+        try:
+            if worker:
+                worker.progress.emit(2, "Selecting fastest Excel engine...")
+            
+            # Get sheet information
+            sheet_name = import_info.get('sheet_name', 0)
+            file_ext = os.path.splitext(file_path)[1].lower()
+            
+            start_total = time.time()
+            
+            # Try multiple engines in order of speed (fastest first)
+            excel_data = None
+            engine_used = "unknown"
+            
+            # Engine 1: Try python-calamine (Rust-based, fastest)
+            try:
+                import python_calamine
+                if worker:
+                    worker.progress.emit(8, "Using BLAZING-FAST Rust engine (calamine)...")
+                excel_data, engine_used = self._read_excel_calamine(file_path, sheet_name)
+            except ImportError:
+                pass
+            except Exception as e:
+                print(f"Calamine engine failed: {e}")
+            
+            # Engine 2: Try polars (very fast)
+            if excel_data is None:
+                try:
+                    import polars as pl
+                    if worker:
+                        worker.progress.emit(8, "Using ULTRA-FAST Polars engine...")
+                    excel_data, engine_used = self._read_excel_polars(file_path, sheet_name)
+                except ImportError:
+                    pass
+                except Exception as e:
+                    print(f"Polars engine failed: {e}")
+            
+            # Engine 3: Try xlrd for .xls files (faster than openpyxl for old format)
+            if excel_data is None and file_ext == '.xls':
+                try:
+                    import xlrd
+                    if worker:
+                        worker.progress.emit(8, "Using optimized XLS engine...")
+                    excel_data, engine_used = self._read_excel_xlrd(file_path, sheet_name)
+                except ImportError:
+                    pass
+                except Exception as e:
+                    print(f"xlrd engine failed: {e}")
+            
+            # Engine 4: Fallback to optimized openpyxl
+            if excel_data is None:
+                if worker:
+                    worker.progress.emit(8, "Using optimized OpenPyXL engine...")
+                excel_data, engine_used = self._read_excel_openpyxl(file_path, sheet_name)
+            
+            if excel_data is None:
+                if worker:
+                    worker.error.emit("Failed to read Excel file with all available engines")
+                return False
+            
+            read_time = time.time() - start_total
+            rows_count = len(excel_data)
+            
+            if worker:
+                worker.progress.emit(35, f"✨ {engine_used} read {rows_count:,} rows in {read_time:.2f}s")
+            
+            if rows_count == 0:
+                if worker:
+                    worker.error.emit("No data found in Excel file")
+                return False
+            
+            # Convert to DataFrame for fast database insertion
+            if worker:
+                worker.progress.emit(45, "Converting to optimized format...")
+            
+            df = pd.DataFrame(excel_data[1:], columns=excel_data[0])  # First row as headers
+            
+            # Drop table if create mode
+            if mode == 'create':
+                self.drop_table_if_exists(table_name)
+            
+            if worker:
+                worker.progress.emit(60, "Executing BLAZING database insert...")
+            
+            # Use the fastest database insertion method
+            import_start = time.time()
+            success = self.fast_database_insert(df, table_name, mode, worker)
+            
+            if not success:
+                return False
+            
+            if worker:
+                worker.progress.emit(85, "Verifying import...")
+            
+            # Get row count
+            result = self.current_connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+            actual_rows = result[0] if result else 0
+            
+            total_time = time.time() - start_total
+            import_time = time.time() - import_start
+            speed = actual_rows / max(total_time, 0.001)
+            
+            if worker:
+                worker.progress.emit(95, f"🚀 BLAZING import: {actual_rows:,} rows in {total_time:.2f}s ({speed:,.0f} rows/sec)")
+            
+                            # Refresh schema browser with error handling
+                try:
+                    self.refresh_schema_browser()
+                except Exception as refresh_error:
+                    print(f"Schema refresh warning: {refresh_error}")
+                    # Import was successful, just refresh failed - continue
+                
+                print(f"🚀 BLAZING Excel import ({engine_used}): {actual_rows:,} rows in {total_time:.2f}s ({speed:,.0f} rows/sec)")
+                print(f"   📖 Excel read: {read_time:.2f}s | 💾 DB insert: {import_time:.2f}s")
+                return True
+            
+        except Exception as e:
+            print(f"Blazing Excel import failed: {e}")
+            if worker:
+                worker.error.emit(f"Excel import failed: {str(e)}")
+            return False
+    
+    def _read_excel_calamine(self, file_path, sheet_name):
+        """Read Excel using python-calamine (Rust-based, fastest)"""
+        from python_calamine import CalamineWorkbook
+        
+        workbook = CalamineWorkbook.from_path(file_path)
+        
+        # Get sheet names and select the right one
+        sheet_names = workbook.sheet_names
+        if isinstance(sheet_name, int):
+            actual_sheet = sheet_names[sheet_name] if sheet_name < len(sheet_names) else sheet_names[0]
+        else:
+            actual_sheet = sheet_name if sheet_name in sheet_names else sheet_names[0]
+        
+        # Read all data at once
+        data = workbook.get_sheet_by_name(actual_sheet).to_python()
+        return data, "Rust-Calamine"
+    
+    def _read_excel_polars(self, file_path, sheet_name):
+        """Read Excel using polars (very fast)"""
+        import polars as pl
+        
+        # Read with polars
+        if isinstance(sheet_name, int):
+            df = pl.read_excel(file_path, sheet_id=sheet_name + 1)  # polars uses 1-based indexing
+        else:
+            df = pl.read_excel(file_path, sheet_name=sheet_name)
+        
+        # Convert to list of lists
+        headers = df.columns
+        data = [headers] + df.to_pandas().values.tolist()  # Convert to compatible format
+        return data, "Polars"
+    
+    def _read_excel_xlrd(self, file_path, sheet_name):
+        """Read Excel using xlrd (good for .xls files)"""
+        import xlrd
+        
+        workbook = xlrd.open_workbook(file_path)
+        
+        # Get the worksheet
+        if isinstance(sheet_name, int):
+            worksheet = workbook.sheet_by_index(sheet_name)
+        else:
+            worksheet = workbook.sheet_by_name(sheet_name)
+        
+        # Read all data
+        data = []
+        for row_idx in range(worksheet.nrows):
+            row = [str(worksheet.cell_value(row_idx, col_idx)) for col_idx in range(worksheet.ncols)]
+            data.append(row)
+        
+        return data, "xlrd"
+    
+    def _read_excel_openpyxl(self, file_path, sheet_name):
+        """Read Excel using openpyxl (fallback, but optimized)"""
+        from openpyxl import load_workbook
+        
+        # Load with maximum optimizations
+        wb = load_workbook(filename=file_path, read_only=True, data_only=True)
+        
+        # Get the worksheet
+        if isinstance(sheet_name, int):
+            ws = wb.worksheets[sheet_name] if sheet_name < len(wb.worksheets) else wb.active
+        else:
+            ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+        
+        # Read all data at once (faster than row-by-row)
+        data = []
+        for row in ws.iter_rows(values_only=True):
+            clean_row = [str(cell) if cell is not None else '' for cell in row]
+            data.append(clean_row)
+        
+        wb.close()
+        return data, "OpenPyXL"
+    
+    def parquet_fallback_import(self, file_path, table_name, mode, worker=None):
+        """Parquet fallback import method"""
+        try:
+            if worker:
+                worker.progress.emit(20, "Loading Parquet file with pandas...")
+            
+            # Load with pandas
+            df = pd.read_parquet(file_path)
+            
+            if df is None or df.empty:
+                if worker:
+                    worker.error.emit("No data found in Parquet file")
+                return False
+            
+            if worker:
+                worker.progress.emit(50, f"Processing {len(df):,} rows from Parquet...")
+            
+            # Process and import
+            df = self.quick_process_dataframe(df)
+            safe_table_name = self.ensure_unique_table_name(table_name, mode)
+            
+            return self.fast_database_insert(df, safe_table_name, mode, worker)
+            
+        except Exception as e:
+            print(f"Parquet fallback import failed: {e}")
+            if worker:
+                worker.error.emit(f"Parquet import failed: {str(e)}")
+            return False
+    
+    def json_fallback_import(self, file_path, table_name, mode, worker=None):
+        """JSON fallback import method with improved error handling and chunking"""
+        try:
+            if worker:
+                worker.progress.emit(10, "Analyzing JSON file...")
+            
+            # Get file size to determine approach
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+            
+            safe_table_name = self.ensure_unique_table_name(table_name, mode)
+            
+            # For large JSON files (>100MB), use chunked reading
+            if file_size_mb > 100:
+                return self.json_chunked_import(file_path, safe_table_name, mode, worker)
+            else:
+                return self.json_direct_import(file_path, safe_table_name, mode, worker)
+            
+        except Exception as e:
+            print(f"JSON fallback import failed: {e}")
+            if worker:
+                worker.error.emit(f"JSON import failed: {str(e)}")
+            return False
+    
+    def json_direct_import(self, file_path, table_name, mode, worker=None):
+        """Direct JSON import for smaller files"""
+        try:
+            if worker:
+                worker.progress.emit(20, "Loading JSON file...")
+            
+            # Try multiple approaches for loading JSON
+            df = None
+            
+            # First try: pandas read_json (fastest)
+            try:
+                df = pd.read_json(file_path)
+            except ValueError:
+                # Second try: manual JSON parsing (more flexible)
+                if worker:
+                    worker.progress.emit(30, "Trying alternative JSON parsing...")
+                
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                if isinstance(data, list):
+                    df = pd.DataFrame(data)
+                elif isinstance(data, dict):
+                    df = pd.DataFrame([data])
+                else:
+                    if worker:
+                        worker.error.emit("Unsupported JSON format")
+                    return False
+            
+            if df is None or df.empty:
+                if worker:
+                    worker.error.emit("No data found in JSON file")
+                return False
+            
+            if worker:
+                worker.progress.emit(50, f"Processing {len(df):,} rows from JSON...")
+            
+            # Process and import
+            df = self.quick_process_dataframe(df)
+            
+            if worker:
+                worker.progress.emit(70, f"Inserting {len(df):,} rows into database...")
+            
+            return self.fast_database_insert(df, table_name, mode, worker)
+            
+        except Exception as e:
+            print(f"JSON direct import failed: {e}")
+            if worker:
+                worker.error.emit(f"JSON direct import failed: {str(e)}")
+            return False
+    
+    def json_chunked_import(self, file_path, table_name, mode, worker=None):
+        """Chunked JSON import for large files"""
+        try:
+            if worker:
+                worker.progress.emit(15, "Reading large JSON file in chunks...")
+            
+            # For very large JSON files, read and process in chunks
+            try:
+                # Try to load the JSON file
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                if not isinstance(data, list):
+                    data = [data]
+                
+                total_records = len(data)
+                if worker:
+                    worker.progress.emit(25, f"Found {total_records:,} records in JSON file")
+                
+                # Process in chunks
+                chunk_size = 50000  # Process 50k records at a time
+                table_created = False
+                
+                for i in range(0, total_records, chunk_size):
+                    if worker and worker.cancelled:
+                        return False
+                    
+                    chunk_data = data[i:i+chunk_size]
+                    chunk_num = i // chunk_size + 1
+                    total_chunks = (total_records - 1) // chunk_size + 1
+                    
+                    if worker:
+                        progress = 30 + int((i / total_records) * 60)
+                        worker.progress.emit(progress, f"Processing chunk {chunk_num}/{total_chunks}: {len(chunk_data):,} records")
+                    
+                    # Convert chunk to DataFrame
+                    chunk_df = pd.DataFrame(chunk_data)
+                    
+                    if chunk_df.empty:
+                        continue
+                    
+                    # Process chunk
+                    chunk_df = self.quick_process_dataframe(chunk_df)
+                    
+                    # Insert chunk
+                    if not table_created:
+                        success = self.fast_database_insert(chunk_df, table_name, mode, worker)
+                        table_created = True
+                    else:
+                        success = self.fast_database_insert(chunk_df, table_name, 'append', worker)
+                    
+                    if not success:
+                        if worker:
+                            worker.error.emit(f"Failed to insert JSON chunk {chunk_num}")
+                        return False
+                
+                if worker:
+                    worker.progress.emit(90, f"JSON import completed: {total_records:,} records")
+                
+                # Refresh schema browser with error handling
+                try:
+                    self.refresh_schema_browser()
+                except Exception as refresh_error:
+                    print(f"Schema refresh warning: {refresh_error}")
+                    # Import was successful, just refresh failed - continue
+                
+                print(f"JSON chunked import completed: {total_records:,} records imported to '{table_name}'")
+                return True
+                
+            except json.JSONDecodeError as e:
+                if worker:
+                    worker.error.emit(f"Invalid JSON format: {str(e)}")
+                return False
+            except MemoryError:
+                if worker:
+                    worker.error.emit("JSON file too large to process - consider splitting it into smaller files")
+                return False
+            
+        except Exception as e:
+            print(f"JSON chunked import failed: {e}")
+            if worker:
+                worker.error.emit(f"JSON chunked import failed: {str(e)}")
             return False
     
     def import_small_file_fast(self, import_info, worker=None):
@@ -4437,394 +4575,9 @@ class SQLEditorApp(QMainWindow):
                 worker.error.emit(f"Chunked import failed: {str(e)}")
             return False
     
-    def import_folder_data(self, folder_import_info):
-        """Import data from multiple files in a folder with column mismatch handling"""
-        try:
-            file_paths = folder_import_info['file_paths']
-            table_name = folder_import_info['table_name']
-            mode = folder_import_info['mode']
-            add_filename_column = folder_import_info['add_filename_column']
-            
-            if not file_paths:
-                QMessageBox.warning(self, "No Files", "No supported files found in the selected folder.")
-                return
-            
-            # Show progress dialog
-            progress_dialog = QProgressDialog("Processing files...", "Cancel", 0, len(file_paths), self)
-            progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-            progress_dialog.setMinimumDuration(0)
-            progress_dialog.show()
-            
-            # Process each file and collect dataframes
-            all_dataframes = []
-            all_columns = set()
-            successful_files = []
-            failed_files = []
-            
-            self.statusBar().showMessage(f"Processing {len(file_paths)} files...")
-            
-            for i, file_path in enumerate(file_paths):
-                if progress_dialog.wasCanceled():
-                    self.statusBar().showMessage("Import cancelled by user", 3000)
-                    return
-                
-                progress_dialog.setLabelText(f"Processing {os.path.basename(file_path)}...")
-                progress_dialog.setValue(i)
-                QApplication.processEvents()  # Allow UI to update
-                
-                try:
-                    # Determine file type and create import info
-                    file_ext = os.path.splitext(file_path)[1].lower()
-                    
-                    # Create file-specific import info
-                    file_import_info = {
-                        'file_type': file_ext,
-                        'encoding': folder_import_info.get('csv_encoding', 'utf-8'),
-                        'delimiter': self.get_delimiter_for_file(file_ext, folder_import_info),
-                        'header': folder_import_info.get('csv_header', True)
-                    }
-                    
-                    # Handle Excel files specially
-                    if file_ext in ['.xlsx', '.xls']:
-                        sheet_behavior = folder_import_info.get('excel_sheet_behavior', 'Import first sheet only')
-                        if sheet_behavior == 'Import all sheets (combine)':
-                            df = self.load_excel_all_sheets(file_path)
-                        elif sheet_behavior == 'Ask for each file':
-                            df = self.load_excel_with_dialog(file_path)
-                        elif 'Use specific sheet name' in sheet_behavior:
-                            # Use the default sheet name specified by user
-                            default_sheet = folder_import_info.get('excel_default_sheet', '')
-                            if default_sheet:
-                                file_import_info['sheet_name'] = default_sheet
-                            else:
-                                file_import_info['sheet_name'] = 0  # Fallback to first sheet
-                            df = self.safe_load_data(file_path, file_ext, file_import_info)
-                        else:  # Import first sheet only
-                            file_import_info['sheet_name'] = 0
-                            df = self.safe_load_data(file_path, file_ext, file_import_info)
-                    else:
-                        # Load file using existing safe_load_data method
-                        df = self.safe_load_data(file_path, file_ext, file_import_info)
-                    
-                    if df is not None and not df.empty:
-                        # Handle duplicate columns first
-                        df = self.handle_duplicate_columns(df)
-                        
-                        # Clean column names
-                        df.columns = [self.clean_column_name(col) for col in df.columns]
-                        
-                        # Add filename column if requested (after cleaning column names)
-                        if add_filename_column:
-                            # Ensure the source file column name is unique
-                            source_col_name = '_source_file'
-                            counter = 1
-                            while source_col_name in df.columns:
-                                source_col_name = f'_source_file_{counter}'
-                                counter += 1
-                            df[source_col_name] = os.path.basename(file_path)
-                        
-                        # Sanitize the dataframe
-                        df = self.sanitize_dataframe(df)
-                        
-                        # Track all columns across files
-                        all_columns.update(df.columns)
-                        
-                        all_dataframes.append(df)
-                        successful_files.append(file_path)
-                    else:
-                        failed_files.append(f"{os.path.basename(file_path)}: No data found")
-                        
-                except Exception as e:
-                    failed_files.append(f"{os.path.basename(file_path)}: {str(e)}")
-                    continue
-            
-            progress_dialog.setValue(len(file_paths))
-            
-            if not all_dataframes:
-                QMessageBox.warning(self, "Import Failed", "No data could be loaded from any of the files.")
-                return
-            
-            # Create unified dataframe with all columns
-            self.statusBar().showMessage("Combining data from all files...")
-            
-            # Ensure all dataframes have the same columns (fill missing with None)
-            all_columns = sorted(list(all_columns))
-            
-            for df in all_dataframes:
-                for col in all_columns:
-                    if col not in df.columns:
-                        df[col] = None
-                # Reorder columns to match
-                df = df[all_columns]
-            
-            # Concatenate all dataframes
-            combined_df = pd.concat(all_dataframes, ignore_index=True, sort=False)
-            
-            # Ensure unique table name
-            safe_table_name = self.ensure_unique_table_name(table_name, mode)
-            
-            # Validate combined data before import
-            errors, warnings = self.validate_import_data(combined_df, safe_table_name, mode)
-            
-            # Show validation results if any
-            if errors:
-                error_msg = "Cannot proceed with folder import:\n\n" + "\n".join(f"• {error}" for error in errors)
-                QMessageBox.critical(self, "Folder Import Validation Failed", error_msg)
-                return
-            
-            if warnings:
-                warning_msg = "Folder import warnings:\n\n" + "\n".join(f"• {warning}" for warning in warnings)
-                warning_msg += "\n\nDo you want to continue with the import?"
-                
-                reply = QMessageBox.question(
-                    self, "Folder Import Warnings", warning_msg,
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.Yes
-                )
-                
-                if reply == QMessageBox.StandardButton.No:
-                    return
-            
-            # Handle import mode
-            if mode == 'replace':
-                # Drop table if exists
-                try:
-                    if self.current_connection_info['type'].lower() == 'duckdb':
-                        self.current_connection.execute(f"DROP TABLE IF EXISTS {safe_table_name}")
-                    else:  # SQLite
-                        self.current_connection.execute(f"DROP TABLE IF EXISTS {safe_table_name}")
-                        self.current_connection.commit()
-                except:
-                    pass  # Table might not exist
-            
-            # Import combined data to database
-            success = self.safe_import_to_database(combined_df, safe_table_name, mode)
-            
-            # Show results
-            if success:
-                # Create summary message
-                total_rows = len(combined_df)
-                total_cols = len(combined_df.columns)
-                
-                summary_parts = [
-                    f"✅ Successfully imported {total_rows:,} rows × {total_cols} columns",
-                    f"📊 Table: {safe_table_name}",
-                    f"📁 From {len(successful_files)} files"
-                ]
-                
-                if failed_files:
-                    summary_parts.append(f"⚠️  {len(failed_files)} files failed")
-                
-                summary_msg = "\n".join(summary_parts)
-                
-                # Show table name change if it occurred
-                if safe_table_name != table_name:
-                    summary_msg += f"\n\n⚠️ Table name was changed from '{table_name}' to '{safe_table_name}' to ensure uniqueness."
-                
-                if failed_files:
-                    failed_details = "\n".join(failed_files[:5])  # Show first 5 failures
-                    if len(failed_files) > 5:
-                        failed_details += f"\n... and {len(failed_files) - 5} more"
-                    
-                    summary_msg += f"\n\nFailed files:\n{failed_details}"
-                
-                QMessageBox.information(self, "Folder Import Complete", summary_msg)
-                self.statusBar().showMessage(f"Folder import complete: {total_rows:,} rows imported", 5000)
-                
-                # Refresh schema browser to show new/updated table
-                self.refresh_schema_browser()
-            else:
-                QMessageBox.critical(self, "Import Failed", "Failed to import the combined data to database.")
-                self.statusBar().showMessage("Folder import failed", 5000)
-                
-        except Exception as e:
-            error_msg = str(e)
-            QMessageBox.critical(self, "Folder Import Error", f"Failed to import folder:\n{error_msg}")
-            self.statusBar().showMessage(f"Folder import failed: {error_msg}", 5000)
+
     
-    def import_folder_data_optimized(self, folder_import_info, worker=None):
-        """Optimized folder import with parallel processing and chunking"""
-        try:
-            folder_path = folder_import_info['folder_path']
-            table_name = folder_import_info['table_name']
-            mode = folder_import_info['mode']
-            
-            # Determine file type from the found files
-            file_paths = folder_import_info.get('file_paths', [])
-            if not file_paths:
-                if worker:
-                    worker.error.emit("No files found in the selected folder.")
-                return False
-            
-            # Get file type from the first file
-            first_file = file_paths[0]
-            file_ext = os.path.splitext(first_file)[1].lower()
-            
-            # Map extension to file type name (keep as extension format)
-            if file_ext == '.csv':
-                file_type = '.csv'
-            elif file_ext in ['.xlsx', '.xls']:
-                file_type = file_ext  # Keep the actual extension
-            elif file_ext == '.json':
-                file_type = '.json'
-            elif file_ext == '.parquet':
-                file_type = '.parquet'
-            elif file_ext == '.tsv':
-                file_type = '.tsv'
-            elif file_ext == '.txt':
-                file_type = '.txt'
-            else:
-                file_type = '.csv'  # Default fallback
-            
-            if worker:
-                worker.progress.emit(5, "Scanning folder for files...")
-            
-            # Use the files already found by the dialog
-            files_to_import = [os.path.basename(f) for f in file_paths]
-            total_files = len(files_to_import)
-            if worker:
-                worker.progress.emit(10, f"Found {total_files} files to import...")
-            
-            # Ensure unique table name
-            safe_table_name = self.ensure_unique_table_name(table_name, mode)
-            
-            # Handle table creation/replacement
-            if mode == 'replace':
-                try:
-                    if self.current_connection_info['type'].lower() == 'duckdb':
-                        self.current_connection.execute(f"DROP TABLE IF EXISTS {safe_table_name}")
-                    else:  # SQLite
-                        self.current_connection.execute(f"DROP TABLE IF EXISTS {safe_table_name}")
-                        self.current_connection.commit()
-                except:
-                    pass
-            
-            total_rows_imported = 0
-            table_created = False
-            
-            # Process files with optimized approach for folder import
-            all_dataframes = []
-            
-            for i, filename in enumerate(files_to_import):
-                if worker and worker.cancelled:
-                    return False
-                
-                file_path = os.path.join(folder_path, filename)
-                
-                # Calculate progress
-                file_progress = int(10 + (i / total_files) * 70)
-                if worker:
-                    worker.progress.emit(file_progress, f"Loading file {i+1}/{total_files}: {filename}")
-                
-                # Create import info for this file
-                file_import_info = {
-                    'file_path': file_path,
-                    'table_name': safe_table_name,
-                    'file_type': file_type,
-                    'mode': 'append' if table_created else mode,
-                    'delimiter': folder_import_info.get('csv_delimiter', ','),
-                    'encoding': folder_import_info.get('csv_encoding', 'utf-8'),
-                    'header': folder_import_info.get('csv_header', True)
-                }
-                
-                # Load the file data
-                try:
-                    print(f"About to load file: {filename} with type: {file_type}")
-                    df = self.safe_load_data_optimized(file_path, file_type, file_import_info)
-                    
-                    if df is None:
-                        print(f"Failed to load file (returned None): {filename}")
-                        continue
-                    elif df.empty:
-                        print(f"File loaded but is empty: {filename}")
-                        continue
-                    else:
-                        print(f"Successfully loaded file: {filename} with {len(df)} rows and {len(df.columns)} columns")
-                    
-                    # Quick process the dataframe
-                    df = self.quick_process_dataframe(df)
-                    
-                    # Add filename column if requested
-                    if folder_import_info.get('add_filename_column', True):
-                        df['_source_file'] = filename
-                    
-                    all_dataframes.append(df)
-                    print(f"Loaded {len(df)} rows from {filename}")
-                    
-                except Exception as e:
-                    print(f"Failed to load file {filename}: {e}")
-                    if worker:
-                        worker.error.emit(f"Failed to load file {filename}: {str(e)}")
-                    continue
-            
-            if not all_dataframes:
-                if worker:
-                    worker.error.emit("No data could be loaded from any files.")
-                return False
-            
-            if worker:
-                worker.progress.emit(80, "Combining all files...")
-            
-            # Combine all dataframes with column alignment
-            try:
-                combined_df = self.combine_dataframes_with_alignment(all_dataframes)
-                print(f"Combined dataframes: {len(combined_df)} total rows, {len(combined_df.columns)} columns")
-                
-                if worker:
-                    worker.progress.emit(90, f"Inserting {len(combined_df):,} rows into database...")
-                
-                # Insert the combined data
-                success = self.fast_database_insert(combined_df, safe_table_name, mode, worker)
-                
-                if not success:
-                    print("Failed to insert combined data")
-                    if worker:
-                        worker.error.emit("Failed to insert combined data into database")
-                    return False
-                
-                total_rows_imported = len(combined_df)
-                
-            except Exception as e:
-                print(f"Failed to combine or insert data: {e}")
-                if worker:
-                    worker.error.emit(f"Failed to combine or insert data: {str(e)}")
-                return False
-            
-            if worker:
-                worker.progress.emit(95, "Finalizing folder import...")
-            
-            # Update schema browser
-            self.refresh_schema_browser()
-            
-            print(f"Optimized folder import completed: ~{total_rows_imported:,} rows from {total_files} files imported to '{safe_table_name}'")
-            return True
-            
-        except Exception as e:
-            print(f"Optimized folder import failed: {e}")
-            if worker:
-                worker.error.emit(f"Optimized folder import failed: {str(e)}")
-            return False
-    
-    def get_delimiter_for_file(self, file_ext, folder_import_info):
-        """Get the appropriate delimiter for the file type"""
-        delimiter = folder_import_info.get('csv_delimiter', ',')
-        
-        # Handle special delimiter representations
-        if delimiter == '\\t':
-            delimiter = '\t'
-        elif delimiter == '\\n':
-            delimiter = '\n'
-        elif delimiter == '\\r':
-            delimiter = '\r'
-        
-        if file_ext == '.csv':
-            return delimiter
-        elif file_ext == '.tsv':
-            return '\t'  # Always tab for TSV
-        elif file_ext == '.txt':
-            return delimiter
-        else:
-            return delimiter
+
     
     def load_excel_all_sheets(self, file_path):
         """Load all sheets from an Excel file and combine them"""
@@ -5235,8 +4988,17 @@ class SQLEditorApp(QMainWindow):
                 except:
                     pass
                 
-                # Create and insert in one operation
-                self.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df")
+                # Convert all DataFrame columns to strings to ensure TEXT type
+                for col in df.columns:
+                    df[col] = df[col].apply(self.safe_string_convert)
+                
+                # Create table with explicit TEXT columns to prevent type inference issues
+                columns_sql = ", ".join([f'"{col}" TEXT' for col in df.columns])
+                self.current_connection.execute(f"CREATE TABLE {table_name} ({columns_sql})")
+                
+                # Insert data using explicit column list
+                column_list = ', '.join([f'"{col}"' for col in df.columns])
+                self.current_connection.execute(f"INSERT INTO {table_name} ({column_list}) SELECT {column_list} FROM df")
             
             elif mode == 'append':
                 # Check if table exists
@@ -5247,20 +5009,60 @@ class SQLEditorApp(QMainWindow):
                     table_exists = False
                 
                 if not table_exists:
-                    # Create table
-                    self.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df")
+                    # Convert all DataFrame columns to strings to ensure TEXT type
+                    for col in df.columns:
+                        df[col] = df[col].apply(self.safe_string_convert)
+                    
+                    # Create table with explicit TEXT columns to prevent type inference issues
+                    columns_sql = ", ".join([f'"{col}" TEXT' for col in df.columns])
+                    self.current_connection.execute(f"CREATE TABLE {table_name} ({columns_sql})")
+                    
+                    # Insert data using explicit column list
+                    column_list = ', '.join([f'"{col}"' for col in df.columns])
+                    self.current_connection.execute(f"INSERT INTO {table_name} ({column_list}) SELECT {column_list} FROM df")
                 else:
-                    # Insert data
-                    self.current_connection.execute(f"INSERT INTO {table_name} SELECT * FROM df")
+                    # For append mode, check column compatibility first
+                    try:
+                        # Get existing table columns
+                        existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+                        existing_columns = [col[1] for col in existing_cols_result]
+                        
+                        # Get new DataFrame columns
+                        df_columns = list(df.columns)
+                        
+                        # Calculate column compatibility for informational purposes
+                        matching_columns = set(existing_columns) & set(df_columns)
+                        compatibility_ratio = len(matching_columns) / max(len(existing_columns), len(df_columns)) if existing_columns and df_columns else 0
+                        
+                        print(f"Column compatibility: {compatibility_ratio:.1%}. Proceeding with flexible append to existing table.")
+                        
+                        # Use flexible append which handles all column mismatches automatically
+                        return self.flexible_append_data(df, table_name, 'duckdb')
+                    except Exception as col_error:
+                        print(f"Column alignment failed in fast insert, using fallback: {col_error}")
+                        # Fallback to flexible append method
+                        return self.flexible_append_data(df, table_name, 'duckdb')
             
             else:  # create mode
-                # Create new table
-                self.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df")
+                # Convert all DataFrame columns to strings to ensure TEXT type
+                for col in df.columns:
+                    df[col] = df[col].apply(self.safe_string_convert)
+                
+                # Create table with explicit TEXT columns to prevent type inference issues
+                columns_sql = ", ".join([f'"{col}" TEXT' for col in df.columns])
+                self.current_connection.execute(f"CREATE TABLE {table_name} ({columns_sql})")
+                
+                # Insert data using explicit column list
+                column_list = ', '.join([f'"{col}"' for col in df.columns])
+                self.current_connection.execute(f"INSERT INTO {table_name} ({column_list}) SELECT {column_list} FROM df")
             
             return True
             
         except Exception as e:
             print(f"Fast DuckDB insert failed: {e}")
+            # Convert DataFrame to strings before fallback to prevent conversion errors
+            for col in df.columns:
+                df[col] = df[col].apply(self.safe_string_convert)
             # Fallback to regular method
             return self.duckdb_safe_import(df, table_name, mode)
     
@@ -5312,10 +5114,10 @@ class SQLEditorApp(QMainWindow):
                 for col in df.columns:
                     aligned_df[col] = df[col]
                 
-                # Add missing columns with None values
+                # Add missing columns with empty strings (TEXT compatible)
                 for col in all_columns:
                     if col not in aligned_df.columns:
-                        aligned_df[col] = None
+                        aligned_df[col] = ""
                 
                 # Reorder columns to match the standard order
                 aligned_df = aligned_df[all_columns]
@@ -5357,8 +5159,8 @@ class SQLEditorApp(QMainWindow):
             # Create a copy to avoid modifying the original
             df_clean = df.copy()
             
-            # Handle column names - ensure they're clean
-            df_clean.columns = [str(col).strip() if col is not None else f"col_{i}" for i, col in enumerate(df_clean.columns)]
+            # Handle column names - ensure they're clean and valid
+            df_clean = self.ensure_valid_column_names(df_clean)
             
             # Process each column
             for col in df_clean.columns:
@@ -5381,7 +5183,7 @@ class SQLEditorApp(QMainWindow):
                     })
                     
                     # Remove any remaining problematic characters
-                    df_clean[col] = df_clean[col].apply(lambda x: self.safe_string_convert(x) if x is not None else None)
+                    df_clean[col] = df_clean[col].apply(lambda x: self.safe_string_convert(x))
                     
                 except Exception as e:
                     print(f"Error processing column {col}: {e}")
@@ -5390,20 +5192,6 @@ class SQLEditorApp(QMainWindow):
             
             # Remove completely empty rows
             df_clean = df_clean.dropna(how='all')
-            
-            # Ensure no column names are duplicated
-            cols = df_clean.columns.tolist()
-            seen = set()
-            unique_cols = []
-            for col in cols:
-                original_col = col
-                counter = 1
-                while col in seen:
-                    col = f"{original_col}_{counter}"
-                    counter += 1
-                seen.add(col)
-                unique_cols.append(col)
-            df_clean.columns = unique_cols
             
             print(f"Sanitization complete: {len(df_clean)} rows × {len(df_clean.columns)} columns")
             return df_clean
@@ -5458,15 +5246,22 @@ class SQLEditorApp(QMainWindow):
             return ','
     
     def safe_string_convert(self, value):
-        """Safely convert any value to a database-compatible string"""
+        """Safely convert any value to a database-compatible string - never returns None"""
         try:
-            if value is None or pd.isna(value):
-                return None
+            if value is None:
+                return ""  # Convert None to empty string
+            
+            try:
+                if pd.isna(value):
+                    return ""  # Convert NaN to empty string
+            except (ValueError, TypeError):
+                # Handle arrays and other complex types that can't be checked with pd.isna
+                pass
             
             # Handle different types
             if isinstance(value, (int, float)):
                 if pd.isna(value) or pd.isinf(value):
-                    return None
+                    return ""  # Convert inf/NaN to empty string
                 return str(value)
             
             # Convert to string and handle encoding issues
@@ -5484,7 +5279,8 @@ class SQLEditorApp(QMainWindow):
             return str_val
             
         except Exception:
-            return "conversion_error"
+            # Return empty string instead of None to ensure TEXT compatibility
+            return ""
     
     def safe_import_to_database(self, df, table_name, mode):
         """Safely import dataframe to database with multiple fallback strategies"""
@@ -5563,8 +5359,9 @@ class SQLEditorApp(QMainWindow):
                         
                         # Insert rows one by one, skipping problematic ones
                         successful_rows = 0
+                        column_list = ", ".join([f'"{col}"' for col in df.columns])
                         placeholders = ", ".join(["?" for _ in df.columns])
-                        insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
+                        insert_sql = f'INSERT INTO {table_name} ({column_list}) VALUES ({placeholders})'
                         
                         for idx, row in df.iterrows():
                             try:
@@ -5627,14 +5424,27 @@ class SQLEditorApp(QMainWindow):
                 # For append mode, table should already exist
                 try:
                     result = self.current_connection.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
+                    
+                    # Check and align columns for append mode
+                    existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+                    existing_columns = [col[1] for col in existing_cols_result]
+                    new_columns = list(df.columns)
+                    
+                    # Add missing columns to existing table
+                    for col in new_columns:
+                        if col not in existing_columns:
+                            self.current_connection.execute(f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT')
+                            print(f"Added missing column '{col}' to table '{table_name}'")
+                    
                 except Exception as e:
                     if "does not exist" in str(e).lower() or "no such table" in str(e).lower():
                         raise ValueError(f"Table '{table_name}' does not exist. Use 'Create' mode to create a new table.")
                     raise e
             
-            # Insert data using DuckDB's efficient INSERT
+            # Insert data using DuckDB's efficient INSERT with explicit column list
+            column_list = ", ".join([f'"{col}"' for col in df.columns])
             placeholders = ", ".join(["?" for _ in df.columns])
-            insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
+            insert_sql = f'INSERT INTO {table_name} ({column_list}) VALUES ({placeholders})'
             
             # Convert all data to strings to avoid type issues
             data_rows = []
@@ -5663,6 +5473,9 @@ class SQLEditorApp(QMainWindow):
             
         except Exception as e:
             print(f"DuckDB import failed: {e}")
+            # Convert DataFrame to strings before final fallback to prevent conversion errors
+            for col in df.columns:
+                df[col] = df[col].apply(self.safe_string_convert)
             return self.row_by_row_insert_fallback(df, table_name, mode)
     
     def row_by_row_insert_fallback(self, df, table_name, mode):
@@ -5687,10 +5500,13 @@ class SQLEditorApp(QMainWindow):
             if db_type == 'sqlite':
                 self.current_connection.commit()
             
-            # Insert rows one by one with error handling
+            # Insert rows one by one with error handling using explicit column list
             successful_rows = 0
+            
+            # Create explicit column list and placeholders to prevent binder errors
+            column_list = ", ".join([f'"{col}"' for col in df.columns])
             placeholders = ", ".join(["?" for _ in df.columns])
-            insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
+            insert_sql = f'INSERT INTO {table_name} ({column_list}) VALUES ({placeholders})'
             
             for idx, row in df.iterrows():
                 try:
@@ -5719,6 +5535,9 @@ class SQLEditorApp(QMainWindow):
     def flexible_append_data(self, df, table_name, db_type):
         """Append data with flexible column handling - adds missing columns automatically and handles all errors"""
         try:
+            # Clean and validate column names first
+            df = self.ensure_valid_column_names(df)
+            
             # Get existing table schema with error handling
             existing_columns = set()
             table_exists = False
@@ -5768,11 +5587,47 @@ class SQLEditorApp(QMainWindow):
                 print(f"Adding new columns to table '{table_name}': {', '.join(missing_columns)}")
                 for col in missing_columns:
                     try:
-                        # Always use TEXT type to avoid conflicts
+                        # Debug: Check column name before SQL generation
+                        print(f"Debug: Adding column '{col}' (length: {len(col)}, type: {type(col)})")
+                        print(f"Debug: Column repr: {repr(col)}")
+                        print(f"Debug: Column bytes: {col.encode('utf-8') if isinstance(col, str) else 'Not a string'}")
+                        
+                        # Validate column name is not empty
+                        if not col or str(col).strip() == '':
+                            print(f"Error: Empty column name detected! Using fallback name.")
+                            col = "unnamed_column_fallback"
+                        
+                        # Check if column already exists to prevent duplicate column error
+                        try:
+                            existing_columns_result = self.current_connection.execute(f"DESCRIBE {table_name}").fetchall()
+                            existing_columns = [row[0] for row in existing_columns_result]
+                            print(f"Debug: Existing columns in table: {existing_columns}")
+                            
+                            if col in existing_columns:
+                                print(f"Debug: Column '{col}' already exists, skipping ADD COLUMN")
+                                continue
+                        except Exception as desc_error:
+                            print(f"Debug: Could not check existing columns: {desc_error}")
+                            # Continue with ALTER TABLE attempt
+                        
+                        # Always use TEXT type - DuckDB has issues with DEFAULT "" so we'll use NULL
                         alter_sql = f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT'
+                        print(f"Debug: Generated SQL: {alter_sql}")
+                        print(f"Debug: SQL repr: {repr(alter_sql)}")
+                        print(f"Debug: SQL length: {len(alter_sql)}")
+                        
+                        # Check if the SQL contains empty quotes
+                        if '""' in alter_sql.replace('DEFAULT ""', ''):
+                            print(f"WARNING: Empty quotes detected in SQL (excluding DEFAULT)!")
+                            print(f"SQL breakdown: table='{table_name}', col='{col}'")
+                        
                         self.current_connection.execute(alter_sql)
+                        # Update existing rows to have empty strings instead of NULL
+                        update_sql = f"UPDATE {table_name} SET \"{col}\" = '' WHERE \"{col}\" IS NULL"
+                        self.current_connection.execute(update_sql)
                     except Exception as alter_error:
                         print(f"Failed to add column {col}: {alter_error}")
+                        print(f"Debug: Column details - Name: '{col}', Length: {len(str(col))}, Repr: {repr(col)}")
                         # Continue with other columns
                         
                 if db_type == 'sqlite':
@@ -5781,17 +5636,20 @@ class SQLEditorApp(QMainWindow):
             # Find columns in the table that are not in the new data
             extra_table_columns = existing_columns - new_columns
             
-            # Add missing columns to the dataframe with NULL values
+            # Add missing columns to the dataframe with empty strings (TEXT compatible)
             for col in extra_table_columns:
-                df[col] = None
+                df[col] = ""
             
             # Reorder dataframe columns to match table schema (existing + new)
             all_columns = list(existing_columns) + list(missing_columns)
-            df = df.reindex(columns=all_columns)
+            df = df.reindex(columns=all_columns, fill_value="")
             
-            # Convert all data to strings to prevent type conflicts
+            # Convert all data to strings to prevent type conflicts and ensure no NULL values
             for col in df.columns:
-                df[col] = df[col].apply(lambda x: self.safe_string_convert(x) if x is not None else None)
+                df[col] = df[col].apply(lambda x: self.safe_string_convert(x))
+            
+            # Final safety check: replace any remaining NaN/None values with empty strings
+            df = df.fillna("")
             
             # Try to append the data
             try:
@@ -5803,15 +5661,39 @@ class SQLEditorApp(QMainWindow):
             except Exception as append_error:
                 print(f"Bulk append failed: {append_error}")
                 
-                # Try row-by-row insert as fallback
+                # Try row-by-row insert as fallback with explicit column list
                 try:
                     successful_rows = 0
-                    placeholders = ", ".join(["?" for _ in df.columns])
-                    insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
+                    
+                    # Get current table structure to ensure we have all columns
+                    try:
+                        if db_type == 'duckdb':
+                            current_table_info = self.current_connection.execute(f"PRAGMA table_info('{table_name}')").fetchdf()
+                            table_columns = current_table_info['name'].tolist()
+                        else:  # sqlite
+                            cursor = self.current_connection.cursor()
+                            cursor.execute(f"PRAGMA table_info({table_name})")
+                            table_columns = [row[1] for row in cursor.fetchall()]
+                    except Exception as e:
+                        print(f"Could not get table structure: {e}")
+                        table_columns = list(df.columns)
+                    
+                    # Create explicit column list and placeholders
+                    column_list = ", ".join([f'"{col}"' for col in table_columns])
+                    placeholders = ", ".join(["?" for _ in table_columns])
+                    insert_sql = f'INSERT INTO {table_name} ({column_list}) VALUES ({placeholders})'
                     
                     for idx, row in df.iterrows():
                         try:
-                            values = [self.safe_string_convert(val) for val in row.values]
+                            # Prepare values in the correct order matching table columns
+                            values = []
+                            for col in table_columns:
+                                if col in df.columns:
+                                    val = row[col] if col in row.index else None
+                                    values.append(self.safe_string_convert(val))
+                                else:
+                                    values.append("")  # Missing column gets empty string
+                            
                             self.current_connection.execute(insert_sql, values)
                             successful_rows += 1
                             
@@ -5854,11 +5736,60 @@ class SQLEditorApp(QMainWindow):
         if clean_name and not clean_name[0].isalpha() and clean_name[0] != '_':
             clean_name = f"col_{clean_name}"
         
-        # Handle empty names
-        if not clean_name:
+        # Handle empty names - this is critical to prevent SQL parser errors
+        if not clean_name or clean_name.strip() == '':
             clean_name = "unnamed_column"
         
         return clean_name
+    
+    def ensure_valid_column_names(self, df):
+        """Ensure all column names are valid and unique for database operations"""
+        if df is None or df.empty:
+            return df
+        
+        # Create a copy to avoid modifying the original
+        df_copy = df.copy()
+        
+        # Get current column names
+        columns = list(df_copy.columns)
+        new_columns = []
+        seen_names = set()
+        
+        for i, col in enumerate(columns):
+            # Handle None, NaN, or empty column names
+            if col is None or pd.isna(col) or str(col).strip() == '':
+                base_name = f"column_{i + 1}"
+            else:
+                # Clean the existing column name
+                base_name = self.clean_column_name(col)
+                
+                # Additional safety check: if cleaning resulted in empty string, use default
+                if not base_name or base_name.strip() == '':
+                    base_name = f"column_{i + 1}"
+            
+            # Ensure uniqueness
+            final_name = base_name
+            counter = 1
+            while final_name.lower() in seen_names:
+                final_name = f"{base_name}_{counter}"
+                counter += 1
+            
+            seen_names.add(final_name.lower())
+            new_columns.append(final_name)
+        
+        # Update dataframe columns
+        df_copy.columns = new_columns
+        
+        # Log any changes made
+        changes_made = []
+        for old, new in zip(columns, new_columns):
+            if str(old) != str(new):
+                changes_made.append(f"'{old}' -> '{new}'")
+        
+        if changes_made:
+            print(f"Column names updated: {', '.join(changes_made)}")
+        
+        return df_copy
     
     def ensure_unique_table_name(self, base_name, mode='create'):
         """Ensure table name is unique and safe for database operations"""
