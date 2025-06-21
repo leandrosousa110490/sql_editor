@@ -52,6 +52,8 @@ from PyQt6.QtCore import (
 )
 import qtawesome as qta
 
+# Bulk Excel import will be loaded dynamically when needed
+
 # Set application style
 QApplication.setStyle('Fusion')
 
@@ -3023,6 +3025,16 @@ class SQLEditorApp(QMainWindow):
         self.import_data_button.setToolTip("Import data from CSV, Excel, Parquet, JSON files")
         self.import_data_button.clicked.connect(self.show_import_dialog)
         self.toolbar.addWidget(self.import_data_button)
+        
+        # Bulk Excel Import button
+        self.bulk_excel_button = QToolButton()
+        self.bulk_excel_button.setIcon(qta.icon('fa5s.rocket', color=ColorScheme.WARNING))
+        self.bulk_excel_button.setText("Bulk Excel")
+        self.bulk_excel_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.bulk_excel_button.setToolTip("Fast bulk import of all Excel files from a folder (Ctrl+Shift+I)")
+        self.bulk_excel_button.clicked.connect(self.show_bulk_excel_import_dialog)
+        # Bulk import button is always available (will check dependencies when used)
+        self.toolbar.addWidget(self.bulk_excel_button)
     
     def create_actions(self):
         # File actions
@@ -3061,6 +3073,12 @@ class SQLEditorApp(QMainWindow):
         self.import_data_action = QAction(qta.icon('fa5s.file-import', color=ColorScheme.SUCCESS), "&Import Data...", self)
         self.import_data_action.setShortcut("Ctrl+I")
         self.import_data_action.triggered.connect(self.show_import_dialog)
+        
+        # Bulk Excel import action
+        self.bulk_excel_import_action = QAction(qta.icon('fa5s.rocket', color=ColorScheme.WARNING), "Bulk Excel Import...", self)
+        self.bulk_excel_import_action.setShortcut("Ctrl+Shift+I")
+        self.bulk_excel_import_action.triggered.connect(self.show_bulk_excel_import_dialog)
+        # Bulk import action is always available (will check dependencies when used)
         
         # Query actions
         self.execute_action = QAction(qta.icon('fa5s.play', color=ColorScheme.SUCCESS), "&Execute Query", self)
@@ -3106,6 +3124,7 @@ class SQLEditorApp(QMainWindow):
         self.db_menu.addAction(self.disconnect_action)
         self.db_menu.addSeparator()
         self.db_menu.addAction(self.import_data_action)
+        self.db_menu.addAction(self.bulk_excel_import_action)
         
         # Query menu
         self.query_menu = self.menuBar().addMenu("&Query")
@@ -3164,6 +3183,28 @@ class SQLEditorApp(QMainWindow):
             
             # For append and replace modes, table name is already selected from dropdown
             self.start_import_worker(import_info)
+    
+    def show_bulk_excel_import_dialog(self):
+        """Show the bulk Excel import dialog"""
+        if not self.current_connection:
+            QMessageBox.warning(self, "No Connection", "Please connect to a database first.")
+            return
+            
+        try:
+            from bulk_excel_import import BulkExcelImportDialog
+            dialog = BulkExcelImportDialog(self, self.current_connection, self.current_connection_info)
+            dialog.exec()
+            
+            # Always refresh schema browser after dialog closes in case import occurred
+            self.refresh_schema_browser()
+            self.check_schema_changes()
+            
+        except ImportError:
+            QMessageBox.warning(self, "Feature Not Available", 
+                              "Bulk Excel import requires additional dependencies.\n"
+                              "Please install: pip install polars qtawesome")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open bulk import dialog: {str(e)}")
     
 
     def start_import_worker(self, import_info):
@@ -3562,39 +3603,10 @@ class SQLEditorApp(QMainWindow):
                     {base_select}{csv_params}
                     """
                 else:  # append mode
-                    # For append mode, check and align columns first
-                    try:
-                        # Get existing table columns
-                        existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-                        existing_columns = [col[1] for col in existing_cols_result]
-                        
-                        # Read a sample to get new file columns
-                        sample_df = pd.read_csv(file_path, delimiter=delimiter, nrows=1, encoding=encoding, header=0 if has_header else None)
-                        if not has_header:
-                            sample_df.columns = [f'column_{i+1}' for i in range(len(sample_df.columns))]
-                        
-                        # Clean column names
-                        sample_df = self.ensure_valid_column_names(sample_df)
-                        new_columns = list(sample_df.columns)
-                        
-                        # Add missing columns to existing table
-                        for col in new_columns:
-                            if col not in existing_columns:
-                                self.current_connection.execute(f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT')
-                        
-                        # Create column mapping for INSERT
-                        column_list = ', '.join([f'"{col}"' for col in new_columns])
-                        sql = f"""
-                        INSERT INTO {table_name} ({column_list})
-                        {base_select}{csv_params}
-                        """
-                    except Exception as col_error:
-                        print(f"Column alignment failed, using flexible append: {col_error}")
-                        # Fallback to flexible append method
-                        sample_df = pd.read_csv(file_path, delimiter=delimiter, nrows=100, encoding=encoding, header=0 if has_header else None)
-                        if not has_header:
-                            sample_df.columns = [f'column_{i+1}' for i in range(len(sample_df.columns))]
-                        return self.flexible_append_data(sample_df, table_name, 'duckdb')
+                    sql = f"""
+                    INSERT INTO {table_name} 
+                    {base_select}{csv_params}
+                    """
                     
             elif file_type == '.tsv':
                 has_header = import_info.get('header', True)
@@ -3624,39 +3636,10 @@ class SQLEditorApp(QMainWindow):
                     {base_select}{tsv_params}
                     """
                 else:  # append mode
-                    # For append mode, check and align columns first
-                    try:
-                        # Get existing table columns
-                        existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-                        existing_columns = [col[1] for col in existing_cols_result]
-                        
-                        # Read a sample to get new file columns
-                        sample_df = pd.read_csv(file_path, delimiter='\t', nrows=1, header=0 if has_header else None)
-                        if not has_header:
-                            sample_df.columns = [f'column_{i+1}' for i in range(len(sample_df.columns))]
-                        
-                        # Clean column names
-                        sample_df = self.ensure_valid_column_names(sample_df)
-                        new_columns = list(sample_df.columns)
-                        
-                        # Add missing columns to existing table
-                        for col in new_columns:
-                            if col not in existing_columns:
-                                self.current_connection.execute(f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT')
-                        
-                        # Create column mapping for INSERT
-                        column_list = ', '.join([f'"{col}"' for col in new_columns])
-                        sql = f"""
-                        INSERT INTO {table_name} ({column_list})
-                        {base_select}{tsv_params}
-                        """
-                    except Exception as col_error:
-                        print(f"Column alignment failed, using flexible append: {col_error}")
-                        # Fallback to flexible append method
-                        sample_df = pd.read_csv(file_path, delimiter='\t', nrows=100, header=0 if has_header else None)
-                        if not has_header:
-                            sample_df.columns = [f'column_{i+1}' for i in range(len(sample_df.columns))]
-                        return self.flexible_append_data(sample_df, table_name, 'duckdb')
+                    sql = f"""
+                    INSERT INTO {table_name} 
+                    {base_select}{tsv_params}
+                    """
                     
             elif file_type == '.parquet':
                 if worker:
@@ -3675,40 +3658,10 @@ class SQLEditorApp(QMainWindow):
                     {base_select}
                     """
                 else:  # append mode
-                    # For append mode, check and align columns first
-                    try:
-                        # Get existing table columns
-                        existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-                        existing_columns = [col[1] for col in existing_cols_result]
-                        
-                        # Read a sample to get new file columns
-                        sample_df = pd.read_parquet(file_path, nrows=1)
-                        
-                        # Clean column names
-                        sample_df = self.ensure_valid_column_names(sample_df)
-                        new_columns = list(sample_df.columns)
-                        
-                        # Add missing columns to existing table
-                        for col in new_columns:
-                            if col not in existing_columns:
-                                self.current_connection.execute(f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT')
-                        
-                        # Create column mapping for INSERT
-                        column_list = ', '.join([f'"{col}"' for col in new_columns])
-                        if add_filename_column and source_filename:
-                            base_select_with_cols = f"SELECT {column_list}, '{source_filename}' AS _source_file FROM read_parquet('{file_path}')"
-                        else:
-                            base_select_with_cols = f"SELECT {column_list} FROM read_parquet('{file_path}')"
-                        
-                        sql = f"""
-                        INSERT INTO {table_name} ({column_list}{', _source_file' if add_filename_column and source_filename else ''})
-                        {base_select_with_cols}
-                        """
-                    except Exception as col_error:
-                        print(f"Column alignment failed, using flexible append: {col_error}")
-                        # Fallback to flexible append method
-                        sample_df = pd.read_parquet(file_path, nrows=100)
-                        return self.flexible_append_data(sample_df, table_name, 'duckdb')
+                    sql = f"""
+                    INSERT INTO {table_name} 
+                    {base_select}
+                    """
                     
             elif file_type == '.json':
                 if worker:
@@ -3727,43 +3680,10 @@ class SQLEditorApp(QMainWindow):
                     {base_select}
                     """
                 else:  # append mode
-                    # For append mode, check and align columns first
-                    try:
-                        # Get existing table columns
-                        existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-                        existing_columns = [col[1] for col in existing_cols_result]
-                        
-                        # Read a sample to get new file columns
-                        sample_df = pd.read_json(file_path, lines=True, nrows=1)
-                        
-                        # Clean column names
-                        sample_df = self.ensure_valid_column_names(sample_df)
-                        new_columns = list(sample_df.columns)
-                        
-                        # Add missing columns to existing table
-                        for col in new_columns:
-                            if col not in existing_columns:
-                                self.current_connection.execute(f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT')
-                        
-                        # Create column mapping for INSERT
-                        column_list = ', '.join([f'"{col}"' for col in new_columns])
-                        if add_filename_column and source_filename:
-                            base_select_with_cols = f"SELECT {column_list}, '{source_filename}' AS _source_file FROM read_json_auto('{file_path}')"
-                        else:
-                            base_select_with_cols = f"SELECT {column_list} FROM read_json_auto('{file_path}')"
-                        
-                        sql = f"""
-                        INSERT INTO {table_name} ({column_list}{', _source_file' if add_filename_column and source_filename else ''})
-                        {base_select_with_cols}
-                        """
-                    except Exception as col_error:
-                        print(f"Column alignment failed, using flexible append: {col_error}")
-                        # Fallback to flexible append method
-                        try:
-                            sample_df = pd.read_json(file_path, lines=True, nrows=100)
-                        except:
-                            sample_df = pd.read_json(file_path, nrows=100)
-                        return self.flexible_append_data(sample_df, table_name, 'duckdb')
+                    sql = f"""
+                    INSERT INTO {table_name} 
+                    {base_select}
+                    """
             elif file_type in ['.xlsx', '.xls']:
                 if worker:
                     worker.progress.emit(20, "Using streamlined Excel import...")
@@ -4988,17 +4908,8 @@ class SQLEditorApp(QMainWindow):
                 except:
                     pass
                 
-                # Convert all DataFrame columns to strings to ensure TEXT type
-                for col in df.columns:
-                    df[col] = df[col].apply(self.safe_string_convert)
-                
-                # Create table with explicit TEXT columns to prevent type inference issues
-                columns_sql = ", ".join([f'"{col}" TEXT' for col in df.columns])
-                self.current_connection.execute(f"CREATE TABLE {table_name} ({columns_sql})")
-                
-                # Insert data using explicit column list
-                column_list = ', '.join([f'"{col}"' for col in df.columns])
-                self.current_connection.execute(f"INSERT INTO {table_name} ({column_list}) SELECT {column_list} FROM df")
+                # Create and insert in one operation
+                self.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df")
             
             elif mode == 'append':
                 # Check if table exists
@@ -5009,60 +4920,20 @@ class SQLEditorApp(QMainWindow):
                     table_exists = False
                 
                 if not table_exists:
-                    # Convert all DataFrame columns to strings to ensure TEXT type
-                    for col in df.columns:
-                        df[col] = df[col].apply(self.safe_string_convert)
-                    
-                    # Create table with explicit TEXT columns to prevent type inference issues
-                    columns_sql = ", ".join([f'"{col}" TEXT' for col in df.columns])
-                    self.current_connection.execute(f"CREATE TABLE {table_name} ({columns_sql})")
-                    
-                    # Insert data using explicit column list
-                    column_list = ', '.join([f'"{col}"' for col in df.columns])
-                    self.current_connection.execute(f"INSERT INTO {table_name} ({column_list}) SELECT {column_list} FROM df")
+                    # Create table
+                    self.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df")
                 else:
-                    # For append mode, check column compatibility first
-                    try:
-                        # Get existing table columns
-                        existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-                        existing_columns = [col[1] for col in existing_cols_result]
-                        
-                        # Get new DataFrame columns
-                        df_columns = list(df.columns)
-                        
-                        # Calculate column compatibility for informational purposes
-                        matching_columns = set(existing_columns) & set(df_columns)
-                        compatibility_ratio = len(matching_columns) / max(len(existing_columns), len(df_columns)) if existing_columns and df_columns else 0
-                        
-                        print(f"Column compatibility: {compatibility_ratio:.1%}. Proceeding with flexible append to existing table.")
-                        
-                        # Use flexible append which handles all column mismatches automatically
-                        return self.flexible_append_data(df, table_name, 'duckdb')
-                    except Exception as col_error:
-                        print(f"Column alignment failed in fast insert, using fallback: {col_error}")
-                        # Fallback to flexible append method
-                        return self.flexible_append_data(df, table_name, 'duckdb')
+                    # Insert data
+                    self.current_connection.execute(f"INSERT INTO {table_name} SELECT * FROM df")
             
             else:  # create mode
-                # Convert all DataFrame columns to strings to ensure TEXT type
-                for col in df.columns:
-                    df[col] = df[col].apply(self.safe_string_convert)
-                
-                # Create table with explicit TEXT columns to prevent type inference issues
-                columns_sql = ", ".join([f'"{col}" TEXT' for col in df.columns])
-                self.current_connection.execute(f"CREATE TABLE {table_name} ({columns_sql})")
-                
-                # Insert data using explicit column list
-                column_list = ', '.join([f'"{col}"' for col in df.columns])
-                self.current_connection.execute(f"INSERT INTO {table_name} ({column_list}) SELECT {column_list} FROM df")
+                # Create new table
+                self.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM df")
             
             return True
             
         except Exception as e:
             print(f"Fast DuckDB insert failed: {e}")
-            # Convert DataFrame to strings before fallback to prevent conversion errors
-            for col in df.columns:
-                df[col] = df[col].apply(self.safe_string_convert)
             # Fallback to regular method
             return self.duckdb_safe_import(df, table_name, mode)
     
@@ -5114,10 +4985,10 @@ class SQLEditorApp(QMainWindow):
                 for col in df.columns:
                     aligned_df[col] = df[col]
                 
-                # Add missing columns with empty strings (TEXT compatible)
+                # Add missing columns with None values
                 for col in all_columns:
                     if col not in aligned_df.columns:
-                        aligned_df[col] = ""
+                        aligned_df[col] = None
                 
                 # Reorder columns to match the standard order
                 aligned_df = aligned_df[all_columns]
@@ -5159,8 +5030,8 @@ class SQLEditorApp(QMainWindow):
             # Create a copy to avoid modifying the original
             df_clean = df.copy()
             
-            # Handle column names - ensure they're clean and valid
-            df_clean = self.ensure_valid_column_names(df_clean)
+            # Handle column names - ensure they're clean
+            df_clean.columns = [str(col).strip() if col is not None else f"col_{i}" for i, col in enumerate(df_clean.columns)]
             
             # Process each column
             for col in df_clean.columns:
@@ -5183,7 +5054,7 @@ class SQLEditorApp(QMainWindow):
                     })
                     
                     # Remove any remaining problematic characters
-                    df_clean[col] = df_clean[col].apply(lambda x: self.safe_string_convert(x))
+                    df_clean[col] = df_clean[col].apply(lambda x: self.safe_string_convert(x) if x is not None else None)
                     
                 except Exception as e:
                     print(f"Error processing column {col}: {e}")
@@ -5192,6 +5063,20 @@ class SQLEditorApp(QMainWindow):
             
             # Remove completely empty rows
             df_clean = df_clean.dropna(how='all')
+            
+            # Ensure no column names are duplicated
+            cols = df_clean.columns.tolist()
+            seen = set()
+            unique_cols = []
+            for col in cols:
+                original_col = col
+                counter = 1
+                while col in seen:
+                    col = f"{original_col}_{counter}"
+                    counter += 1
+                seen.add(col)
+                unique_cols.append(col)
+            df_clean.columns = unique_cols
             
             print(f"Sanitization complete: {len(df_clean)} rows × {len(df_clean.columns)} columns")
             return df_clean
@@ -5246,22 +5131,15 @@ class SQLEditorApp(QMainWindow):
             return ','
     
     def safe_string_convert(self, value):
-        """Safely convert any value to a database-compatible string - never returns None"""
+        """Safely convert any value to a database-compatible string"""
         try:
-            if value is None:
-                return ""  # Convert None to empty string
-            
-            try:
-                if pd.isna(value):
-                    return ""  # Convert NaN to empty string
-            except (ValueError, TypeError):
-                # Handle arrays and other complex types that can't be checked with pd.isna
-                pass
+            if value is None or pd.isna(value):
+                return None
             
             # Handle different types
             if isinstance(value, (int, float)):
                 if pd.isna(value) or pd.isinf(value):
-                    return ""  # Convert inf/NaN to empty string
+                    return None
                 return str(value)
             
             # Convert to string and handle encoding issues
@@ -5279,8 +5157,7 @@ class SQLEditorApp(QMainWindow):
             return str_val
             
         except Exception:
-            # Return empty string instead of None to ensure TEXT compatibility
-            return ""
+            return "conversion_error"
     
     def safe_import_to_database(self, df, table_name, mode):
         """Safely import dataframe to database with multiple fallback strategies"""
@@ -5359,9 +5236,8 @@ class SQLEditorApp(QMainWindow):
                         
                         # Insert rows one by one, skipping problematic ones
                         successful_rows = 0
-                        column_list = ", ".join([f'"{col}"' for col in df.columns])
                         placeholders = ", ".join(["?" for _ in df.columns])
-                        insert_sql = f'INSERT INTO {table_name} ({column_list}) VALUES ({placeholders})'
+                        insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
                         
                         for idx, row in df.iterrows():
                             try:
@@ -5424,27 +5300,14 @@ class SQLEditorApp(QMainWindow):
                 # For append mode, table should already exist
                 try:
                     result = self.current_connection.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
-                    
-                    # Check and align columns for append mode
-                    existing_cols_result = self.current_connection.execute(f"PRAGMA table_info({table_name})").fetchall()
-                    existing_columns = [col[1] for col in existing_cols_result]
-                    new_columns = list(df.columns)
-                    
-                    # Add missing columns to existing table
-                    for col in new_columns:
-                        if col not in existing_columns:
-                            self.current_connection.execute(f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT')
-                            print(f"Added missing column '{col}' to table '{table_name}'")
-                    
                 except Exception as e:
                     if "does not exist" in str(e).lower() or "no such table" in str(e).lower():
                         raise ValueError(f"Table '{table_name}' does not exist. Use 'Create' mode to create a new table.")
                     raise e
             
-            # Insert data using DuckDB's efficient INSERT with explicit column list
-            column_list = ", ".join([f'"{col}"' for col in df.columns])
+            # Insert data using DuckDB's efficient INSERT
             placeholders = ", ".join(["?" for _ in df.columns])
-            insert_sql = f'INSERT INTO {table_name} ({column_list}) VALUES ({placeholders})'
+            insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
             
             # Convert all data to strings to avoid type issues
             data_rows = []
@@ -5473,9 +5336,6 @@ class SQLEditorApp(QMainWindow):
             
         except Exception as e:
             print(f"DuckDB import failed: {e}")
-            # Convert DataFrame to strings before final fallback to prevent conversion errors
-            for col in df.columns:
-                df[col] = df[col].apply(self.safe_string_convert)
             return self.row_by_row_insert_fallback(df, table_name, mode)
     
     def row_by_row_insert_fallback(self, df, table_name, mode):
@@ -5500,13 +5360,10 @@ class SQLEditorApp(QMainWindow):
             if db_type == 'sqlite':
                 self.current_connection.commit()
             
-            # Insert rows one by one with error handling using explicit column list
+            # Insert rows one by one with error handling
             successful_rows = 0
-            
-            # Create explicit column list and placeholders to prevent binder errors
-            column_list = ", ".join([f'"{col}"' for col in df.columns])
             placeholders = ", ".join(["?" for _ in df.columns])
-            insert_sql = f'INSERT INTO {table_name} ({column_list}) VALUES ({placeholders})'
+            insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
             
             for idx, row in df.iterrows():
                 try:
@@ -5535,9 +5392,6 @@ class SQLEditorApp(QMainWindow):
     def flexible_append_data(self, df, table_name, db_type):
         """Append data with flexible column handling - adds missing columns automatically and handles all errors"""
         try:
-            # Clean and validate column names first
-            df = self.ensure_valid_column_names(df)
-            
             # Get existing table schema with error handling
             existing_columns = set()
             table_exists = False
@@ -5587,47 +5441,11 @@ class SQLEditorApp(QMainWindow):
                 print(f"Adding new columns to table '{table_name}': {', '.join(missing_columns)}")
                 for col in missing_columns:
                     try:
-                        # Debug: Check column name before SQL generation
-                        print(f"Debug: Adding column '{col}' (length: {len(col)}, type: {type(col)})")
-                        print(f"Debug: Column repr: {repr(col)}")
-                        print(f"Debug: Column bytes: {col.encode('utf-8') if isinstance(col, str) else 'Not a string'}")
-                        
-                        # Validate column name is not empty
-                        if not col or str(col).strip() == '':
-                            print(f"Error: Empty column name detected! Using fallback name.")
-                            col = "unnamed_column_fallback"
-                        
-                        # Check if column already exists to prevent duplicate column error
-                        try:
-                            existing_columns_result = self.current_connection.execute(f"DESCRIBE {table_name}").fetchall()
-                            existing_columns = [row[0] for row in existing_columns_result]
-                            print(f"Debug: Existing columns in table: {existing_columns}")
-                            
-                            if col in existing_columns:
-                                print(f"Debug: Column '{col}' already exists, skipping ADD COLUMN")
-                                continue
-                        except Exception as desc_error:
-                            print(f"Debug: Could not check existing columns: {desc_error}")
-                            # Continue with ALTER TABLE attempt
-                        
-                        # Always use TEXT type - DuckDB has issues with DEFAULT "" so we'll use NULL
+                        # Always use TEXT type to avoid conflicts
                         alter_sql = f'ALTER TABLE {table_name} ADD COLUMN "{col}" TEXT'
-                        print(f"Debug: Generated SQL: {alter_sql}")
-                        print(f"Debug: SQL repr: {repr(alter_sql)}")
-                        print(f"Debug: SQL length: {len(alter_sql)}")
-                        
-                        # Check if the SQL contains empty quotes
-                        if '""' in alter_sql.replace('DEFAULT ""', ''):
-                            print(f"WARNING: Empty quotes detected in SQL (excluding DEFAULT)!")
-                            print(f"SQL breakdown: table='{table_name}', col='{col}'")
-                        
                         self.current_connection.execute(alter_sql)
-                        # Update existing rows to have empty strings instead of NULL
-                        update_sql = f"UPDATE {table_name} SET \"{col}\" = '' WHERE \"{col}\" IS NULL"
-                        self.current_connection.execute(update_sql)
                     except Exception as alter_error:
                         print(f"Failed to add column {col}: {alter_error}")
-                        print(f"Debug: Column details - Name: '{col}', Length: {len(str(col))}, Repr: {repr(col)}")
                         # Continue with other columns
                         
                 if db_type == 'sqlite':
@@ -5636,20 +5454,17 @@ class SQLEditorApp(QMainWindow):
             # Find columns in the table that are not in the new data
             extra_table_columns = existing_columns - new_columns
             
-            # Add missing columns to the dataframe with empty strings (TEXT compatible)
+            # Add missing columns to the dataframe with NULL values
             for col in extra_table_columns:
-                df[col] = ""
+                df[col] = None
             
             # Reorder dataframe columns to match table schema (existing + new)
             all_columns = list(existing_columns) + list(missing_columns)
-            df = df.reindex(columns=all_columns, fill_value="")
+            df = df.reindex(columns=all_columns)
             
-            # Convert all data to strings to prevent type conflicts and ensure no NULL values
+            # Convert all data to strings to prevent type conflicts
             for col in df.columns:
-                df[col] = df[col].apply(lambda x: self.safe_string_convert(x))
-            
-            # Final safety check: replace any remaining NaN/None values with empty strings
-            df = df.fillna("")
+                df[col] = df[col].apply(lambda x: self.safe_string_convert(x) if x is not None else None)
             
             # Try to append the data
             try:
@@ -5661,39 +5476,15 @@ class SQLEditorApp(QMainWindow):
             except Exception as append_error:
                 print(f"Bulk append failed: {append_error}")
                 
-                # Try row-by-row insert as fallback with explicit column list
+                # Try row-by-row insert as fallback
                 try:
                     successful_rows = 0
-                    
-                    # Get current table structure to ensure we have all columns
-                    try:
-                        if db_type == 'duckdb':
-                            current_table_info = self.current_connection.execute(f"PRAGMA table_info('{table_name}')").fetchdf()
-                            table_columns = current_table_info['name'].tolist()
-                        else:  # sqlite
-                            cursor = self.current_connection.cursor()
-                            cursor.execute(f"PRAGMA table_info({table_name})")
-                            table_columns = [row[1] for row in cursor.fetchall()]
-                    except Exception as e:
-                        print(f"Could not get table structure: {e}")
-                        table_columns = list(df.columns)
-                    
-                    # Create explicit column list and placeholders
-                    column_list = ", ".join([f'"{col}"' for col in table_columns])
-                    placeholders = ", ".join(["?" for _ in table_columns])
-                    insert_sql = f'INSERT INTO {table_name} ({column_list}) VALUES ({placeholders})'
+                    placeholders = ", ".join(["?" for _ in df.columns])
+                    insert_sql = f'INSERT INTO {table_name} VALUES ({placeholders})'
                     
                     for idx, row in df.iterrows():
                         try:
-                            # Prepare values in the correct order matching table columns
-                            values = []
-                            for col in table_columns:
-                                if col in df.columns:
-                                    val = row[col] if col in row.index else None
-                                    values.append(self.safe_string_convert(val))
-                                else:
-                                    values.append("")  # Missing column gets empty string
-                            
+                            values = [self.safe_string_convert(val) for val in row.values]
                             self.current_connection.execute(insert_sql, values)
                             successful_rows += 1
                             
@@ -5736,60 +5527,11 @@ class SQLEditorApp(QMainWindow):
         if clean_name and not clean_name[0].isalpha() and clean_name[0] != '_':
             clean_name = f"col_{clean_name}"
         
-        # Handle empty names - this is critical to prevent SQL parser errors
-        if not clean_name or clean_name.strip() == '':
+        # Handle empty names
+        if not clean_name:
             clean_name = "unnamed_column"
         
         return clean_name
-    
-    def ensure_valid_column_names(self, df):
-        """Ensure all column names are valid and unique for database operations"""
-        if df is None or df.empty:
-            return df
-        
-        # Create a copy to avoid modifying the original
-        df_copy = df.copy()
-        
-        # Get current column names
-        columns = list(df_copy.columns)
-        new_columns = []
-        seen_names = set()
-        
-        for i, col in enumerate(columns):
-            # Handle None, NaN, or empty column names
-            if col is None or pd.isna(col) or str(col).strip() == '':
-                base_name = f"column_{i + 1}"
-            else:
-                # Clean the existing column name
-                base_name = self.clean_column_name(col)
-                
-                # Additional safety check: if cleaning resulted in empty string, use default
-                if not base_name or base_name.strip() == '':
-                    base_name = f"column_{i + 1}"
-            
-            # Ensure uniqueness
-            final_name = base_name
-            counter = 1
-            while final_name.lower() in seen_names:
-                final_name = f"{base_name}_{counter}"
-                counter += 1
-            
-            seen_names.add(final_name.lower())
-            new_columns.append(final_name)
-        
-        # Update dataframe columns
-        df_copy.columns = new_columns
-        
-        # Log any changes made
-        changes_made = []
-        for old, new in zip(columns, new_columns):
-            if str(old) != str(new):
-                changes_made.append(f"'{old}' -> '{new}'")
-        
-        if changes_made:
-            print(f"Column names updated: {', '.join(changes_made)}")
-        
-        return df_copy
     
     def ensure_unique_table_name(self, base_name, mode='create'):
         """Ensure table name is unique and safe for database operations"""
