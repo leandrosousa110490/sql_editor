@@ -1085,8 +1085,8 @@ class DataImportDialog(QDialog):
         self.append_radio = QRadioButton("➕ Append to existing table")
         self.append_radio.setToolTip("Add data to existing table (table must exist)")
         
-        self.replace_radio = QRadioButton("🔄 Replace existing table")
-        self.replace_radio.setToolTip("Drop existing table and create new one with imported data")
+        self.replace_radio = QRadioButton("🔄 Replace table (create if not exists)")
+        self.replace_radio.setToolTip("Drop existing table and create new one with imported data, or create new table if it doesn't exist")
         
         table_layout.addWidget(self.create_new_radio)
         table_layout.addWidget(self.append_radio)

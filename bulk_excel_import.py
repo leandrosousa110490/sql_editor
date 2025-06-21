@@ -272,7 +272,7 @@ class BulkExcelProcessor:
                 }
             
             # Handle table creation/replacement at file level
-            table_exists_before = self.schema_engine.table_exists(table_name)
+            table_exists_before = self.schema_engine.table_exists(table_name) if mode != 'replace' else False
             table_created_this_file = False
             
             for i, sheet_name in enumerate(sheets_to_process):
@@ -290,14 +290,14 @@ class BulkExcelProcessor:
                     added_columns = []
                     
                     if mode == 'replace' and not table_created_this_file:
-                        # Drop existing table before creating new one
-                        if table_exists_before:
-                            if self.connection_info['type'].lower() == 'duckdb':
-                                self.connection.execute(f'DROP TABLE IF EXISTS "{table_name}"')
-                            else:
-                                cursor = self.connection.cursor()
-                                cursor.execute(f'DROP TABLE IF EXISTS "{table_name}"')
-                                self.connection.commit()
+                        # Drop table if exists and create new one (IF EXISTS handles both cases efficiently)
+                        if self.connection_info['type'].lower() == 'duckdb':
+                            self.connection.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+                        else:
+                            cursor = self.connection.cursor()
+                            cursor.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+                            self.connection.commit()
+                        # Always create the table in replace mode
                         current_mode = 'create'
                         table_created_this_file = True
                     elif mode == 'create_new' and not table_exists_before and not table_created_this_file:
@@ -546,7 +546,7 @@ class BulkExcelImportDialog(QDialog):
         
         self.mode_group = QButtonGroup()
         self.create_new_radio = QRadioButton("Create new table (or append if exists)")
-        self.replace_radio = QRadioButton("Replace existing table")
+        self.replace_radio = QRadioButton("Replace table (create if not exists)")
         
         self.create_new_radio.setChecked(True)
         self.mode_group.addButton(self.create_new_radio)
