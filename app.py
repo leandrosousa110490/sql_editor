@@ -561,7 +561,206 @@ class SQLHighlighter(QSyntaxHighlighter):
             else:
                 start_index = -1
 
-# Table model for displaying query results
+# Table model for displaying query results with lazy loading for massive datasets
+class LazyLoadTableModel(QAbstractTableModel):
+    """High-performance table model that lazy loads data for billion+ row datasets"""
+    
+    def __init__(self, connection, query, chunk_size=None):
+        super().__init__()
+        self.connection = connection
+        self.query = query
+        
+        # Load settings
+        settings = QSettings('SQLEditor', 'QuerySettings')
+        self.chunk_size = chunk_size or settings.value('chunk_size', 1000, type=int)
+        self.max_cache_size = settings.value('max_cache_chunks', 50, type=int)
+        
+        # Cache for loaded chunks: {start_row: DataFrame}
+        self.data_cache = {}
+        
+        # Metadata
+        self.total_rows = 0
+        self.columns = []
+        self.column_count = 0
+        
+        # Initialize metadata
+        self._initialize_metadata()
+    
+    def _initialize_metadata(self):
+        """Initialize table metadata without loading all data"""
+        try:
+            # Get total row count efficiently
+            count_query = f"SELECT COUNT(*) FROM ({self.query}) AS count_subquery"
+            
+            if isinstance(self.connection, sqlite3.Connection):
+                cursor = self.connection.cursor()
+                cursor.execute(count_query)
+                self.total_rows = cursor.fetchone()[0]
+                
+                # Get column info from first row
+                cursor.execute(f"SELECT * FROM ({self.query}) AS sample_subquery LIMIT 1")
+                sample_row = cursor.fetchone()
+                if sample_row:
+                    self.columns = [desc[0] for desc in cursor.description]
+                    self.column_count = len(self.columns)
+                    
+            elif isinstance(self.connection, duckdb.DuckDBPyConnection):
+                result = self.connection.execute(count_query).fetchone()
+                self.total_rows = result[0]
+                
+                # Get column info
+                sample_result = self.connection.execute(f"SELECT * FROM ({self.query}) AS sample_subquery LIMIT 1")
+                if sample_result:
+                    self.columns = [desc[0] for desc in sample_result.description]
+                    self.column_count = len(self.columns)
+                    
+        except Exception as e:
+            print(f"Error initializing lazy table metadata: {e}")
+            self.total_rows = 0
+            self.columns = []
+            self.column_count = 0
+    
+    def _get_chunk_start(self, row):
+        """Get the starting row of the chunk containing the given row"""
+        return (row // self.chunk_size) * self.chunk_size
+    
+    def _load_chunk(self, start_row):
+        """Load a chunk of data starting from start_row"""
+        try:
+            # Check if already cached
+            if start_row in self.data_cache:
+                return self.data_cache[start_row]
+            
+            # Clean cache if too large
+            if len(self.data_cache) >= self.max_cache_size:
+                # Remove oldest entries (simple FIFO)
+                oldest_keys = list(self.data_cache.keys())[:10]
+                for key in oldest_keys:
+                    del self.data_cache[key]
+            
+            # Load chunk from database
+            limit_query = f"SELECT * FROM ({self.query}) AS chunked_subquery LIMIT {self.chunk_size} OFFSET {start_row}"
+            
+            if isinstance(self.connection, sqlite3.Connection):
+                df = pd.read_sql_query(limit_query, self.connection)
+            elif isinstance(self.connection, duckdb.DuckDBPyConnection):
+                df = self.connection.execute(limit_query).df()
+            else:
+                df = pd.DataFrame()  # Fallback
+            
+            # Cache the chunk
+            self.data_cache[start_row] = df
+            return df
+            
+        except Exception as e:
+            print(f"Error loading chunk at row {start_row}: {e}")
+            return pd.DataFrame()
+    
+    def rowCount(self, parent=QModelIndex()):
+        return self.total_rows
+    
+    def columnCount(self, parent=QModelIndex()):
+        return self.column_count
+    
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        
+        row = index.row()
+        col = index.column()
+        
+        if row >= self.total_rows or col >= self.column_count:
+            return None
+        
+        if role == Qt.ItemDataRole.DisplayRole:
+            # Determine which chunk this row belongs to
+            chunk_start = self._get_chunk_start(row)
+            chunk_df = self._load_chunk(chunk_start)
+            
+            if chunk_df.empty:
+                return "Loading..."
+            
+            # Get the row within the chunk
+            chunk_row = row - chunk_start
+            if chunk_row >= len(chunk_df):
+                return "Loading..."
+            
+            try:
+                value = chunk_df.iloc[chunk_row, col]
+                if pd.isna(value):
+                    return "NULL"
+                elif isinstance(value, (float, int)):
+                    return str(value)
+                else:
+                    return str(value)
+            except (IndexError, KeyError):
+                return "Loading..."
+                
+        elif role == Qt.ItemDataRole.TextAlignmentRole:
+            # Try to get value for alignment
+            chunk_start = self._get_chunk_start(row)
+            chunk_df = self._load_chunk(chunk_start)
+            
+            if not chunk_df.empty:
+                chunk_row = row - chunk_start
+                if chunk_row < len(chunk_df):
+                    try:
+                        value = chunk_df.iloc[chunk_row, col]
+                        if isinstance(value, (int, float)):
+                            return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                    except (IndexError, KeyError):
+                        pass
+            
+            return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        
+        return None
+    
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole:
+            if orientation == Qt.Orientation.Horizontal:
+                if section < len(self.columns):
+                    return str(self.columns[section])
+                return f"Column {section + 1}"
+            else:
+                return str(section + 1)
+        return None
+    
+    def sort(self, column, order):
+        """Sorting requires recreating the model with ORDER BY clause"""
+        if column >= self.column_count:
+            return
+        
+        column_name = self.columns[column]
+        order_direction = "ASC" if order == Qt.SortOrder.AscendingOrder else "DESC"
+        
+        # Add ORDER BY to the original query
+        # This is a simplified approach - in production, you'd want more sophisticated query parsing
+        if "ORDER BY" in self.query.upper():
+            # Replace existing ORDER BY (simple approach)
+            import re
+            self.query = re.sub(r'ORDER BY.*$', f'ORDER BY "{column_name}" {order_direction}', self.query, flags=re.IGNORECASE)
+        else:
+            self.query += f' ORDER BY "{column_name}" {order_direction}'
+        
+        # Clear cache and reinitialize
+        self.data_cache.clear()
+        self._initialize_metadata()
+        
+        # Notify view that everything changed
+        self.layoutAboutToBeChanged.emit()
+        self.layoutChanged.emit()
+    
+    def canFetchMore(self, parent):
+        """Enable fetch more for better lazy loading"""
+        return True
+    
+    def fetchMore(self, parent):
+        """Preload next chunks when scrolling"""
+        # This is called by the view when it needs more data
+        # We can use this to preload upcoming chunks
+        pass
+
+# Table model for displaying regular query results (backward compatibility)
 class PandasTableModel(QAbstractTableModel):
     def __init__(self, data=None):
         super().__init__()
@@ -610,7 +809,74 @@ class PandasTableModel(QAbstractTableModel):
         )
         self.layoutChanged.emit()
 
-# Worker thread for executing queries
+# Enhanced query worker that supports both lazy and regular loading
+class EnhancedQueryWorker(QThread):
+    # Signals for regular loading
+    finished = pyqtSignal(object, float)  # DataFrame, execution_time
+    error = pyqtSignal(str)
+    
+    # Signals for lazy loading
+    lazy_finished = pyqtSignal(object, float)  # LazyLoadTableModel, execution_time
+    metadata_ready = pyqtSignal(int, list, float)  # total_rows, columns, execution_time
+    
+    def __init__(self, connection, query, use_lazy_loading=True, row_limit=100000):
+        super().__init__()
+        self.connection = connection
+        self.query = query
+        self.use_lazy_loading = use_lazy_loading
+        self.row_limit = row_limit  # Threshold for using lazy loading
+        
+    def run(self):
+        try:
+            start_time = datetime.now()
+            
+            if self.use_lazy_loading:
+                # Check if we should use lazy loading by estimating row count
+                should_use_lazy = self._should_use_lazy_loading()
+                
+                if should_use_lazy:
+                    # Create lazy loading model
+                    lazy_model = LazyLoadTableModel(self.connection, self.query)
+                    execution_time = (datetime.now() - start_time).total_seconds()
+                    self.lazy_finished.emit(lazy_model, execution_time)
+                    return
+            
+            # Regular loading for smaller results
+            if isinstance(self.connection, sqlite3.Connection) or isinstance(self.connection, duckdb.DuckDBPyConnection):
+                df = pd.read_sql_query(self.query, self.connection)
+            else:
+                raise ValueError("Unsupported database connection type")
+                
+            execution_time = (datetime.now() - start_time).total_seconds()
+            self.finished.emit(df, execution_time)
+            
+        except Exception as e:
+            self.error.emit(str(e))
+    
+    def _should_use_lazy_loading(self):
+        """Determine if lazy loading should be used based on estimated result size"""
+        try:
+            # Quick row count estimation
+            count_query = f"SELECT COUNT(*) FROM ({self.query}) AS count_subquery"
+            
+            if isinstance(self.connection, sqlite3.Connection):
+                cursor = self.connection.cursor()
+                cursor.execute(count_query)
+                estimated_rows = cursor.fetchone()[0]
+            elif isinstance(self.connection, duckdb.DuckDBPyConnection):
+                result = self.connection.execute(count_query).fetchone()
+                estimated_rows = result[0]
+            else:
+                return False
+            
+            return estimated_rows > self.row_limit
+            
+        except Exception as e:
+            print(f"Error estimating query size: {e}")
+            # If we can't estimate, default to lazy loading for safety
+            return True
+
+# Worker thread for executing queries (backward compatibility)
 class QueryWorker(QThread):
     finished = pyqtSignal(object, float)
     error = pyqtSignal(str)
@@ -998,6 +1264,156 @@ class CreateDatabaseDialog(QDialog):
                 "file_path": self.created_file_path
             }
         return None
+
+# Settings dialog for lazy loading configuration
+class LazyLoadingSettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Lazy Loading Settings")
+        self.setModal(True)
+        self.resize(500, 400)
+        
+        # Load current settings
+        self.settings = QSettings('SQLEditor', 'QuerySettings')
+        
+        layout = QVBoxLayout(self)
+        
+        # Title
+        title = QLabel("Query Result Loading Settings")
+        title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        layout.addWidget(title)
+        
+        # Description
+        description = QLabel(
+            "Configure how query results are loaded and displayed. "
+            "Lazy loading helps handle massive datasets by loading data on-demand."
+        )
+        description.setWordWrap(True)
+        description.setStyleSheet("margin: 10px 0px; color: #888;")
+        layout.addWidget(description)
+        
+        # Settings form
+        form_layout = QFormLayout()
+        
+        # Lazy loading threshold
+        self.threshold_spin = QSpinBox()
+        self.threshold_spin.setRange(1000, 10000000)
+        self.threshold_spin.setValue(self.settings.value('lazy_loading_threshold', 100000, type=int))
+        self.threshold_spin.setSuffix(" rows")
+        self.threshold_spin.setToolTip("Queries returning more than this many rows will use lazy loading")
+        form_layout.addRow("Lazy Loading Threshold:", self.threshold_spin)
+        
+        # Chunk size
+        self.chunk_spin = QSpinBox()
+        self.chunk_spin.setRange(100, 10000)
+        self.chunk_spin.setValue(self.settings.value('chunk_size', 1000, type=int))
+        self.chunk_spin.setSuffix(" rows")
+        self.chunk_spin.setToolTip("Number of rows to load at once during lazy loading")
+        form_layout.addRow("Chunk Size:", self.chunk_spin)
+        
+        # Cache size
+        self.cache_spin = QSpinBox()
+        self.cache_spin.setRange(10, 200)
+        self.cache_spin.setValue(self.settings.value('max_cache_chunks', 50, type=int))
+        self.cache_spin.setSuffix(" chunks")
+        self.cache_spin.setToolTip("Maximum number of data chunks to keep in memory")
+        form_layout.addRow("Cache Size:", self.cache_spin)
+        
+        # Enable/disable lazy loading
+        self.enable_lazy = QCheckBox("Enable lazy loading for large datasets")
+        self.enable_lazy.setChecked(self.settings.value('enable_lazy_loading', True, type=bool))
+        self.enable_lazy.setToolTip("Uncheck to always load all data into memory (not recommended for large datasets)")
+        form_layout.addRow("", self.enable_lazy)
+        
+        layout.addLayout(form_layout)
+        
+        # Performance info
+        info_group = QGroupBox("Performance Information")
+        info_layout = QVBoxLayout(info_group)
+        
+        info_text = QLabel(
+            "• <b>Lazy Loading:</b> Loads data on-demand as you scroll. Ideal for datasets with millions/billions of rows.\n"
+            "• <b>Regular Loading:</b> Loads all data into memory at once. Faster for small datasets but uses more memory.\n"
+            "• <b>Chunk Size:</b> Smaller chunks = lower memory usage but more database queries.\n"
+            "• <b>Cache Size:</b> Larger cache = less database queries but more memory usage."
+        )
+        info_text.setWordWrap(True)
+        info_text.setStyleSheet("margin: 10px; color: #666;")
+        info_layout.addWidget(info_text)
+        
+        layout.addWidget(info_group)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        
+        reset_button = QPushButton("Reset to Defaults")
+        reset_button.clicked.connect(self.reset_defaults)
+        button_layout.addWidget(reset_button)
+        
+        button_layout.addStretch()
+        
+        cancel_button = QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
+        
+        save_button = QPushButton("Save Settings")
+        save_button.clicked.connect(self.save_settings)
+        save_button.setDefault(True)
+        button_layout.addWidget(save_button)
+        
+        layout.addLayout(button_layout)
+        
+        # Styling
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #2d2d2d;
+                color: #f0f0f0;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #555;
+                border-radius: 5px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+            QPushButton {
+                background-color: #4a4a4a;
+                border: 1px solid #666;
+                border-radius: 3px;
+                padding: 8px 16px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #555;
+            }
+            QPushButton:pressed {
+                background-color: #333;
+            }
+            QPushButton:default {
+                background-color: #0078d4;
+                border-color: #106ebe;
+            }
+        """)
+    
+    def reset_defaults(self):
+        """Reset all settings to defaults"""
+        self.threshold_spin.setValue(100000)
+        self.chunk_spin.setValue(1000)
+        self.cache_spin.setValue(50)
+        self.enable_lazy.setChecked(True)
+    
+    def save_settings(self):
+        """Save settings and close dialog"""
+        self.settings.setValue('lazy_loading_threshold', self.threshold_spin.value())
+        self.settings.setValue('chunk_size', self.chunk_spin.value())
+        self.settings.setValue('max_cache_chunks', self.cache_spin.value())
+        self.settings.setValue('enable_lazy_loading', self.enable_lazy.isChecked())
+        self.accept()
 
 
 class DataImportDialog(QDialog):
@@ -1833,9 +2249,20 @@ class QueryTab(QWidget):
         # Disable editor during execution
         self.editor.setReadOnly(True)
         
-        # Execute query in a separate thread
-        self.query_worker = QueryWorker(self.connection, query)
+        # Execute query in a separate thread with enhanced worker
+        # Check user preference for lazy loading
+        settings = QSettings('SQLEditor', 'QuerySettings')
+        lazy_enabled = settings.value('enable_lazy_loading', True, type=bool)
+        lazy_threshold = settings.value('lazy_loading_threshold', 100000, type=int)
+        
+        self.query_worker = EnhancedQueryWorker(
+            self.connection, 
+            query, 
+            use_lazy_loading=lazy_enabled,
+            row_limit=lazy_threshold
+        )
         self.query_worker.finished.connect(self.handle_query_results)
+        self.query_worker.lazy_finished.connect(self.handle_lazy_query_results)
         self.query_worker.error.connect(self.handle_query_error)
         self.query_worker.start()
     
@@ -1848,6 +2275,7 @@ class QueryTab(QWidget):
             QMessageBox.information(self, "No Selection", "Please select some text in the query editor first.")
     
     def handle_query_results(self, df, execution_time):
+        """Handle regular query results (smaller datasets)"""
         # Update table model with results
         self.model = PandasTableModel(df)
         self.results_table.setModel(self.model)
@@ -1858,7 +2286,43 @@ class QueryTab(QWidget):
         
         # Update results info
         row_count = len(df)
-        self.results_info.setText(f"{row_count} {'row' if row_count == 1 else 'rows'} returned in {execution_time:.3f} seconds")
+        self.results_info.setText(f"{row_count:,} {'row' if row_count == 1 else 'rows'} returned in {execution_time:.3f} seconds")
+        
+        # Enable export button if we have results
+        self.export_button.setEnabled(row_count > 0)
+        
+        # Check if this was a DDL statement that might have changed the schema
+        query = self.editor.toPlainText().strip().upper()
+        ddl_keywords = ['CREATE TABLE', 'DROP TABLE', 'ALTER TABLE', 'CREATE VIEW', 'DROP VIEW', 'CREATE INDEX', 'DROP INDEX']
+        if any(keyword in query for keyword in ddl_keywords):
+            self.schema_changed.emit()
+        
+        # Re-enable editor
+        self.editor.setReadOnly(False)
+    
+    def handle_lazy_query_results(self, lazy_model, execution_time):
+        """Handle lazy query results (massive datasets)"""
+        # Set the lazy loading model
+        self.model = lazy_model
+        self.results_table.setModel(self.model)
+        
+        # Auto-resize columns for better visibility
+        for i in range(self.model.columnCount()):
+            self.results_table.setColumnWidth(i, 200)
+        
+        # Update results info with lazy loading indicator
+        row_count = lazy_model.total_rows
+        if row_count > 1000000:  # Show formatted large numbers
+            if row_count >= 1000000000:  # Billions
+                display_count = f"{row_count/1000000000:.1f}B"
+            elif row_count >= 1000000:  # Millions
+                display_count = f"{row_count/1000000:.1f}M"
+            else:
+                display_count = f"{row_count:,}"
+        else:
+            display_count = f"{row_count:,}"
+        
+        self.results_info.setText(f"🚀 {display_count} rows (lazy loaded) • Query completed in {execution_time:.3f}s • Showing data on-demand")
         
         # Enable export button if we have results
         self.export_button.setEnabled(row_count > 0)
@@ -3094,6 +3558,11 @@ class SQLEditorApp(QMainWindow):
         self.export_results_action.setShortcut("Ctrl+Shift+E")
         self.export_results_action.triggered.connect(self.export_current_results)
         
+        # Settings action
+        self.settings_action = QAction(qta.icon('fa5s.cog'), "&Settings", self)
+        self.settings_action.setStatusTip("Configure lazy loading and performance settings")
+        self.settings_action.triggered.connect(self.show_settings_dialog)
+        
         # Create keyboard shortcut for executing query with Ctrl+Enter
         self.execute_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
         self.execute_shortcut.activated.connect(self.execute_current_query)
@@ -3132,6 +3601,10 @@ class SQLEditorApp(QMainWindow):
         self.query_menu.addAction(self.execute_selection_action)
         self.query_menu.addSeparator()
         self.query_menu.addAction(self.export_results_action)
+        
+        # Tools menu
+        self.tools_menu = self.menuBar().addMenu("&Tools")
+        self.tools_menu.addAction(self.settings_action)
     
     def add_tab(self):
         # Create new query tab
@@ -3206,6 +3679,16 @@ class SQLEditorApp(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open bulk import dialog: {str(e)}")
     
+    def show_settings_dialog(self):
+        """Show the lazy loading settings dialog"""
+        dialog = LazyLoadingSettingsDialog(self)
+        if dialog.exec():
+            # Settings were saved automatically in the dialog
+            QMessageBox.information(
+                self, 
+                "Settings Saved", 
+                "Lazy loading settings have been saved. Changes will apply to new queries."
+            )
 
     def start_import_worker(self, import_info):
         """Start the import worker thread with progress dialog"""
