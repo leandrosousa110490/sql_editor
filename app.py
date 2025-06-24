@@ -1691,8 +1691,8 @@ class CSVMergerDialog(QDialog):
                             
                             if db_type == 'duckdb':
                                 # DuckDB import
-                                if mode == 'create':
-                                    # Drop table if exists for create new mode
+                                if mode in ['create_new', 'replace']:
+                                    # Drop table if exists for create new or replace mode
                                     try:
                                         main_app.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
                                     except:
@@ -1700,23 +1700,52 @@ class CSVMergerDialog(QDialog):
                                 
                                 # Use DuckDB's register and create table functionality
                                 main_app.current_connection.register('temp_df', df)
-                                main_app.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM temp_df")
+                                if mode == 'append':
+                                    # For append mode, check if table exists first
+                                    try:
+                                        # Try to get table info to see if it exists
+                                        main_app.current_connection.execute(f"SELECT * FROM {table_name} LIMIT 0")
+                                        # Table exists, insert data
+                                        main_app.current_connection.execute(f"INSERT INTO {table_name} SELECT * FROM temp_df")
+                                    except:
+                                        # Table doesn't exist, create it
+                                        main_app.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM temp_df")
+                                else:
+                                    # For create_new and replace modes, create table (will create new if doesn't exist)
+                                    main_app.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM temp_df")
                                 main_app.current_connection.unregister('temp_df')
                                 success = True
                                 
                             elif db_type == 'sqlite':
                                 # SQLite import
-                                if mode == 'create':
-                                    # Drop table if exists for create new mode
+                                if mode in ['create_new', 'replace']:
+                                    # Drop table if exists for create new or replace mode
                                     try:
                                         main_app.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
                                     except:
                                         pass
                                 
                                 # Use pandas to_sql method
-                                df.to_sql(table_name, main_app.current_connection, 
-                                         if_exists='replace' if mode in ['create', 'replace'] else 'append',
-                                         index=False)
+                                if mode == 'append':
+                                    # For append mode, use 'append' if table exists, 'replace' if it doesn't
+                                    try:
+                                        # Check if table exists by querying it
+                                        cursor = main_app.current_connection.cursor()
+                                        cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
+                                        table_exists = cursor.fetchone() is not None
+                                        cursor.close()
+                                        
+                                        if table_exists:
+                                            df.to_sql(table_name, main_app.current_connection, if_exists='append', index=False)
+                                        else:
+                                            # Table doesn't exist, create it
+                                            df.to_sql(table_name, main_app.current_connection, if_exists='replace', index=False)
+                                    except Exception as e:
+                                        # If anything fails, try replace mode (will create if doesn't exist)
+                                        df.to_sql(table_name, main_app.current_connection, if_exists='replace', index=False)
+                                else:
+                                    # For create_new and replace modes, use replace (will create if doesn't exist)
+                                    df.to_sql(table_name, main_app.current_connection, if_exists='replace', index=False)
                                 success = True
                                 
                         if not success:
