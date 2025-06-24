@@ -54,6 +54,9 @@ import qtawesome as qta
 
 # Bulk Excel import will be loaded dynamically when needed
 
+# Import CSV merger functionality
+from csv_merger import append_csv_files, get_csv_info
+
 # Set application style
 QApplication.setStyle('Fusion')
 
@@ -1414,6 +1417,340 @@ class LazyLoadingSettingsDialog(QDialog):
         self.settings.setValue('max_cache_chunks', self.cache_spin.value())
         self.settings.setValue('enable_lazy_loading', self.enable_lazy.isChecked())
         self.accept()
+
+
+class CSVMergerDialog(QDialog):
+    """Dialog for merging multiple CSV files into a single file or database table"""
+    
+    def __init__(self, parent=None, connection=None, connection_info=None):
+        super().__init__(parent)
+        self.connection = connection
+        self.connection_info = connection_info
+        self.setWindowTitle("CSV Merger Tool")
+        self.setModal(True)
+        self.resize(600, 500)
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        # Title
+        title = QLabel("Merge Multiple CSV Files")
+        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+        
+        # Input folder selection
+        input_group = QGroupBox("Input Settings")
+        input_layout = QFormLayout()
+        
+        # Folder selection
+        folder_layout = QHBoxLayout()
+        self.folder_path = QLineEdit()
+        self.folder_path.setPlaceholderText("Select folder containing CSV files...")
+        folder_browse_btn = QPushButton("Browse")
+        folder_browse_btn.clicked.connect(self.browse_folder)
+        folder_layout.addWidget(self.folder_path)
+        folder_layout.addWidget(folder_browse_btn)
+        input_layout.addRow("CSV Folder:", folder_layout)
+        
+        # File pattern
+        self.file_pattern = QLineEdit("*.csv")
+        self.file_pattern.setPlaceholderText("e.g., *.csv, data_*.csv")
+        input_layout.addRow("File Pattern:", self.file_pattern)
+        
+        # Preview button
+        self.preview_btn = QPushButton("Preview CSV Files")
+        self.preview_btn.clicked.connect(self.preview_files)
+        input_layout.addRow("", self.preview_btn)
+        
+        # File list
+        self.file_list = QListWidget()
+        self.file_list.setMaximumHeight(150)
+        input_layout.addRow("Files Found:", self.file_list)
+        
+        input_group.setLayout(input_layout)
+        layout.addWidget(input_group)
+        
+        # Output settings
+        output_group = QGroupBox("Output Settings")
+        output_layout = QFormLayout()
+        
+        # Output destination
+        self.output_type = QComboBox()
+        self.output_type.addItems(["Save to File", "Import to Database"])
+        self.output_type.currentTextChanged.connect(self.update_output_ui)
+        output_layout.addRow("Output To:", self.output_type)
+        
+        # Output file selection
+        self.output_file_widget = QWidget()
+        file_layout = QHBoxLayout()
+        file_layout.setContentsMargins(0, 0, 0, 0)
+        self.output_file = QLineEdit()
+        self.output_file.setPlaceholderText("Select output CSV file...")
+        output_browse_btn = QPushButton("Browse")
+        output_browse_btn.clicked.connect(self.browse_output_file)
+        file_layout.addWidget(self.output_file)
+        file_layout.addWidget(output_browse_btn)
+        self.output_file_widget.setLayout(file_layout)
+        output_layout.addRow("Output File:", self.output_file_widget)
+        
+        # Database table name (initially hidden)
+        self.table_name_widget = QWidget()
+        table_layout = QHBoxLayout()
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        self.table_name = QLineEdit()
+        self.table_name.setPlaceholderText("Enter table name...")
+        table_layout.addWidget(self.table_name)
+        self.table_name_widget.setLayout(table_layout)
+        output_layout.addRow("Table Name:", self.table_name_widget)
+        self.table_name_widget.hide()
+        
+        # File mode
+        self.file_mode = QComboBox()
+        self.file_mode.addItems(["Create New", "Replace Existing", "Append to Existing"])
+        output_layout.addRow("Mode:", self.file_mode)
+        
+        output_group.setLayout(output_layout)
+        layout.addWidget(output_group)
+        
+        # Advanced options
+        advanced_group = QGroupBox("Advanced Options")
+        advanced_layout = QFormLayout()
+        
+        # Fill missing values
+        self.fill_missing = QLineEdit()
+        self.fill_missing.setPlaceholderText("Leave empty for NaN, or enter value like 'N/A'")
+        advanced_layout.addRow("Fill Missing Columns:", self.fill_missing)
+        
+        # Encoding
+        self.encoding = QComboBox()
+        self.encoding.addItems(["utf-8", "cp1252", "iso-8859-1", "utf-16"])
+        advanced_layout.addRow("File Encoding:", self.encoding)
+        
+        advanced_group.setLayout(advanced_layout)
+        layout.addWidget(advanced_group)
+        
+        # Buttons
+        button_layout = QHBoxLayout()
+        button_layout.addStretch()
+        
+        self.merge_btn = QPushButton("Merge CSV Files")
+        self.merge_btn.clicked.connect(self.merge_files)
+        self.merge_btn.setEnabled(False)
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        
+        button_layout.addWidget(self.merge_btn)
+        button_layout.addWidget(cancel_btn)
+        layout.addLayout(button_layout)
+        
+        self.setLayout(layout)
+        
+    def browse_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select CSV Folder")
+        if folder:
+            self.folder_path.setText(folder)
+            self.preview_files()
+            
+    def browse_output_file(self):
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Merged CSV", "", "CSV Files (*.csv);;All Files (*)"
+        )
+        if file_path:
+            self.output_file.setText(file_path)
+            self.update_merge_button()
+            
+    def update_output_ui(self):
+        is_file_output = self.output_type.currentText() == "Save to File"
+        self.output_file_widget.setVisible(is_file_output)
+        self.table_name_widget.setVisible(not is_file_output)
+        
+        if not is_file_output and not self.connection:
+            QMessageBox.warning(self, "No Database Connection", 
+                              "Please connect to a database first to import merged data.")
+            self.output_type.setCurrentText("Save to File")
+            
+        self.update_merge_button()
+        
+    def preview_files(self):
+        folder = self.folder_path.text().strip()
+        pattern = self.file_pattern.text().strip() or "*.csv"
+        
+        if not folder or not os.path.exists(folder):
+            self.file_list.clear()
+            self.merge_btn.setEnabled(False)
+            return
+            
+        try:
+            # Get CSV file info
+            csv_info = get_csv_info(folder, pattern)
+            
+            self.file_list.clear()
+            if csv_info:
+                for info in csv_info:
+                    item_text = f"{info['filename']} ({info['column_count']} columns)"
+                    self.file_list.addItem(item_text)
+                    
+                # Auto-suggest table name if database output
+                if self.output_type.currentText() == "Import to Database" and not self.table_name.text():
+                    folder_name = os.path.basename(folder)
+                    suggested_name = f"merged_{folder_name}_data"
+                    self.table_name.setText(suggested_name)
+                    
+            else:
+                self.file_list.addItem("No CSV files found")
+                
+            self.update_merge_button()
+            
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Error previewing files: {str(e)}")
+            
+    def update_merge_button(self):
+        folder_ok = bool(self.folder_path.text().strip() and os.path.exists(self.folder_path.text().strip()))
+        files_ok = self.file_list.count() > 0 and self.file_list.item(0).text() != "No CSV files found"
+        
+        if self.output_type.currentText() == "Save to File":
+            output_ok = bool(self.output_file.text().strip())
+        else:
+            output_ok = bool(self.table_name.text().strip() and self.connection)
+            
+        self.merge_btn.setEnabled(folder_ok and files_ok and output_ok)
+        
+    def merge_files(self):
+        try:
+            folder = self.folder_path.text().strip()
+            pattern = self.file_pattern.text().strip() or "*.csv"
+            fill_value = self.fill_missing.text().strip() or None
+            encoding = self.encoding.currentText()
+            
+            # Determine mode
+            mode_map = {
+                "Create New": "create_new",
+                "Replace Existing": "replace", 
+                "Append to Existing": "append"
+            }
+            mode = mode_map[self.file_mode.currentText()]
+            
+            if self.output_type.currentText() == "Save to File":
+                # Merge to file
+                output_file = self.output_file.text().strip()
+                
+                # Show progress dialog
+                progress = QProgressDialog("Merging CSV files...", "Cancel", 0, 0, self)
+                progress.setWindowModality(Qt.WindowModality.WindowModal)
+                progress.show()
+                QApplication.processEvents()
+                
+                # Perform merge
+                df = append_csv_files(
+                    folder, output_file, mode=mode, fill_missing=fill_value,
+                    encoding=encoding, file_pattern=pattern
+                )
+                
+                progress.close()
+                
+                QMessageBox.information(self, "Success", 
+                    f"Successfully merged {len(df)} rows into {output_file}")
+                
+            else:
+                # Merge to database
+                table_name = self.table_name.text().strip()
+                
+                # Create temporary output file
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as tmp:
+                    temp_file = tmp.name
+                
+                try:
+                    # Show progress dialog
+                    progress = QProgressDialog("Merging CSV files...", "Cancel", 0, 0, self)
+                    progress.setWindowModality(Qt.WindowModality.WindowModal)
+                    progress.show()
+                    QApplication.processEvents()
+                    
+                    # Merge to temporary file
+                    df = append_csv_files(
+                        folder, temp_file, mode="replace", fill_missing=fill_value,
+                        encoding=encoding, file_pattern=pattern
+                    )
+                    
+                    # Import to database directly using pandas
+                    progress.setLabelText("Importing to database...")
+                    QApplication.processEvents()
+                    
+                    main_app = self.parent()
+                    success = False
+                    error_msg = ""
+                    
+                    try:
+                        # Import directly using the merged DataFrame
+                        if main_app.current_connection and main_app.current_connection_info:
+                            db_type = main_app.current_connection_info.get('type', '').lower()
+                            
+                            if db_type == 'duckdb':
+                                # DuckDB import
+                                if mode == 'create':
+                                    # Drop table if exists for create new mode
+                                    try:
+                                        main_app.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+                                    except:
+                                        pass
+                                
+                                # Use DuckDB's register and create table functionality
+                                main_app.current_connection.register('temp_df', df)
+                                main_app.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM temp_df")
+                                main_app.current_connection.unregister('temp_df')
+                                success = True
+                                
+                            elif db_type == 'sqlite':
+                                # SQLite import
+                                if mode == 'create':
+                                    # Drop table if exists for create new mode
+                                    try:
+                                        main_app.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+                                    except:
+                                        pass
+                                
+                                # Use pandas to_sql method
+                                df.to_sql(table_name, main_app.current_connection, 
+                                         if_exists='replace' if mode in ['create', 'replace'] else 'append',
+                                         index=False)
+                                success = True
+                                
+                        if not success:
+                            error_msg = "Unable to determine database type or no connection available"
+                            
+                    except Exception as e:
+                        error_msg = str(e)
+                        success = False
+                    
+                    progress.close()
+                    
+                    if success:
+                        QMessageBox.information(self, "Success", 
+                            f"Successfully merged and imported {len(df)} rows into table '{table_name}'")
+                            
+                        # Signal schema change
+                        if hasattr(main_app, 'refresh_schema_browser'):
+                            main_app.refresh_schema_browser()
+                            main_app.check_schema_changes()
+                    else:
+                        QMessageBox.critical(self, "Import Error", 
+                            f"Failed to import to database: {error_msg}")
+                        
+                finally:
+                    # Clean up temporary file
+                    try:
+                        os.unlink(temp_file)
+                    except:
+                        pass
+                        
+            self.accept()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error merging files: {str(e)}")
 
 
 class DataImportDialog(QDialog):
@@ -3499,6 +3836,15 @@ class SQLEditorApp(QMainWindow):
         self.bulk_excel_button.clicked.connect(self.show_bulk_excel_import_dialog)
         # Bulk import button is always available (will check dependencies when used)
         self.toolbar.addWidget(self.bulk_excel_button)
+        
+        # CSV Merger button
+        self.csv_merger_button = QToolButton()
+        self.csv_merger_button.setIcon(qta.icon('fa5s.layer-group', color=ColorScheme.HIGHLIGHT))
+        self.csv_merger_button.setText("CSV Merger")
+        self.csv_merger_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.csv_merger_button.setToolTip("Merge multiple CSV files into one (Ctrl+Shift+M)")
+        self.csv_merger_button.clicked.connect(self.show_csv_merger_dialog)
+        self.toolbar.addWidget(self.csv_merger_button)
     
     def create_actions(self):
         # File actions
@@ -3542,6 +3888,12 @@ class SQLEditorApp(QMainWindow):
         self.bulk_excel_import_action = QAction(qta.icon('fa5s.rocket', color=ColorScheme.WARNING), "Bulk Excel Import...", self)
         self.bulk_excel_import_action.setShortcut("Ctrl+Shift+I")
         self.bulk_excel_import_action.triggered.connect(self.show_bulk_excel_import_dialog)
+        
+        # CSV Merger action
+        self.csv_merger_action = QAction(qta.icon('fa5s.layer-group', color=ColorScheme.HIGHLIGHT), "CSV Merger...", self)
+        self.csv_merger_action.setShortcut("Ctrl+Shift+M")
+        self.csv_merger_action.setStatusTip("Merge multiple CSV files into one")
+        self.csv_merger_action.triggered.connect(self.show_csv_merger_dialog)
         # Bulk import action is always available (will check dependencies when used)
         
         # Query actions
@@ -3594,6 +3946,7 @@ class SQLEditorApp(QMainWindow):
         self.db_menu.addSeparator()
         self.db_menu.addAction(self.import_data_action)
         self.db_menu.addAction(self.bulk_excel_import_action)
+        self.db_menu.addAction(self.csv_merger_action)
         
         # Query menu
         self.query_menu = self.menuBar().addMenu("&Query")
@@ -3678,6 +4031,19 @@ class SQLEditorApp(QMainWindow):
                               "Please install: pip install polars qtawesome")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open bulk import dialog: {str(e)}")
+    
+    def show_csv_merger_dialog(self):
+        """Show the CSV merger dialog"""
+        try:
+            dialog = CSVMergerDialog(self, self.current_connection, self.current_connection_info)
+            if dialog.exec():
+                # Refresh schema browser after dialog closes in case database import occurred
+                if self.current_connection:
+                    self.refresh_schema_browser()
+                    self.check_schema_changes()
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open CSV merger dialog: {str(e)}")
     
     def show_settings_dialog(self):
         """Show the lazy loading settings dialog"""
