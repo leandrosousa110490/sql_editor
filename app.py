@@ -57,6 +57,13 @@ import qtawesome as qta
 # Import CSV merger functionality
 from csv_merger import append_csv_files, get_csv_info
 
+# Import CSV automation functionality
+try:
+    from csv_automation import show_csv_automation_dialog
+    CSV_AUTOMATION_AVAILABLE = True
+except ImportError:
+    CSV_AUTOMATION_AVAILABLE = False
+
 # Set application style
 QApplication.setStyle('Fusion')
 
@@ -3874,6 +3881,15 @@ class SQLEditorApp(QMainWindow):
         self.csv_merger_button.setToolTip("Merge multiple CSV files into one (Ctrl+Shift+M)")
         self.csv_merger_button.clicked.connect(self.show_csv_merger_dialog)
         self.toolbar.addWidget(self.csv_merger_button)
+        
+        # CSV Automation button
+        self.csv_automation_button = QToolButton()
+        self.csv_automation_button.setIcon(qta.icon('fa5s.cogs', color=ColorScheme.ACCENT))
+        self.csv_automation_button.setText("CSV Automation")
+        self.csv_automation_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.csv_automation_button.setToolTip("Automate processing of multiple CSV folders with SQL (Ctrl+Alt+A)")
+        self.csv_automation_button.clicked.connect(self.show_csv_automation_dialog)
+        self.toolbar.addWidget(self.csv_automation_button)
     
     def create_actions(self):
         # File actions
@@ -3924,6 +3940,12 @@ class SQLEditorApp(QMainWindow):
         self.csv_merger_action.setStatusTip("Merge multiple CSV files into one")
         self.csv_merger_action.triggered.connect(self.show_csv_merger_dialog)
         # Bulk import action is always available (will check dependencies when used)
+        
+        # CSV Automation action
+        self.csv_automation_action = QAction(qta.icon('fa5s.cogs', color=ColorScheme.ACCENT), "CSV Automation...", self)
+        self.csv_automation_action.setShortcut("Ctrl+Alt+A")
+        self.csv_automation_action.setStatusTip("Automate processing of multiple CSV folder sources with SQL")
+        self.csv_automation_action.triggered.connect(self.show_csv_automation_dialog)
         
         # Query actions
         self.execute_action = QAction(qta.icon('fa5s.play', color=ColorScheme.SUCCESS), "&Execute Query", self)
@@ -3976,6 +3998,7 @@ class SQLEditorApp(QMainWindow):
         self.db_menu.addAction(self.import_data_action)
         self.db_menu.addAction(self.bulk_excel_import_action)
         self.db_menu.addAction(self.csv_merger_action)
+        self.db_menu.addAction(self.csv_automation_action)
         
         # Query menu
         self.query_menu = self.menuBar().addMenu("&Query")
@@ -4073,6 +4096,28 @@ class SQLEditorApp(QMainWindow):
                     
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open CSV merger dialog: {str(e)}")
+    
+    def show_csv_automation_dialog(self):
+        """Show the CSV automation dialog"""
+        if not self.current_connection:
+            QMessageBox.warning(self, "No Connection", "Please connect to a database first.")
+            return
+            
+        if not CSV_AUTOMATION_AVAILABLE:
+            QMessageBox.warning(self, "Feature Not Available", 
+                              "CSV automation feature is not available.\n"
+                              "Please ensure csv_automation.py is in the same directory.")
+            return
+            
+        try:
+            show_csv_automation_dialog(self, self.current_connection, self.current_connection_info)
+            
+            # Always refresh schema browser after dialog closes in case import occurred
+            self.refresh_schema_browser()
+            self.check_schema_changes()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to open CSV automation dialog: {str(e)}")
     
     def show_settings_dialog(self):
         """Show the lazy loading settings dialog"""
