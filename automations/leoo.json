@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "created": "2025-06-25T19:55:52.804850",
+  "description": "CSV Automation Configuration",
+  "sources": [
+    {
+      "folder_path": "C:/Users/nbaba/Desktop/csv",
+      "table_name": "csv",
+      "file_pattern": "*.csv"
+    }
+  ],
+  "sql_query": "SELECT * from csv",
+  "output_table": "leooo"
+}

@@ -8,19 +8,29 @@ import pandas as pd
 import duckdb
 import time
 import logging
+import json
 from typing import List, Dict, Optional
 from pathlib import Path
+from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog,
     QProgressBar, QTextEdit, QGroupBox, QListWidget, QLineEdit, QTabWidget, 
-    QWidget, QScrollArea, QFormLayout, QPlainTextEdit, QFrame, QMessageBox
+    QWidget, QScrollArea, QFormLayout, QPlainTextEdit, QFrame, QMessageBox,
+    QListWidgetItem, QInputDialog
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QFont
 import qtawesome as qta
 
 from csv_merger import append_csv_files, get_csv_info
+
+# Import SQL editor components from main app
+try:
+    from app import SQLTextEdit, SQLHighlighter, ColorScheme
+    SQL_EDITOR_AVAILABLE = True
+except ImportError:
+    SQL_EDITOR_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -377,9 +387,13 @@ class CSVAutomationDialog(QDialog):
         # Main content with tabs
         self.tab_widget = QTabWidget()
         
-        # Tab 1: Sources Configuration
+        # Tab 1: Sources Configuration  
         sources_tab = QWidget()
-        sources_layout = QVBoxLayout(sources_tab)
+        sources_main_layout = QHBoxLayout(sources_tab)
+        
+        # Left side - CSV Sources
+        sources_left = QWidget()
+        sources_layout = QVBoxLayout(sources_left)
         
         # Add source button
         self.add_source_btn = QPushButton("Add CSV Source")
@@ -394,15 +408,84 @@ class CSVAutomationDialog(QDialog):
         self.sources_scroll.setWidgetResizable(True)
         sources_layout.addWidget(self.sources_scroll)
         
+        sources_main_layout.addWidget(sources_left, 2)  # 2/3 of the space
+        
+        # Right side - Saved Automations
+        automations_right = QWidget()
+        automations_layout = QVBoxLayout(automations_right)
+        
+        automations_title = QLabel("Saved Automations")
+        automations_title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        automations_layout.addWidget(automations_title)
+        
+        # Automations list
+        self.automations_list = QListWidget()
+        self.automations_list.setMaximumWidth(300)
+        self.automations_list.itemDoubleClicked.connect(self.load_selected_automation)
+        self.automations_list.setToolTip("Double-click to load automation for editing\nUse buttons below to Load, Run, or Delete")
+        automations_layout.addWidget(self.automations_list)
+        
+        # Automation management buttons
+        automation_buttons = QHBoxLayout()
+        
+        self.refresh_automations_btn = QPushButton("Refresh")
+        self.refresh_automations_btn.clicked.connect(self.refresh_automations_list)
+        self.refresh_automations_btn.setToolTip("Refresh the list of saved automations")
+        automation_buttons.addWidget(self.refresh_automations_btn)
+        
+        self.load_selected_btn = QPushButton("Load")
+        self.load_selected_btn.clicked.connect(self.load_selected_automation)
+        self.load_selected_btn.setToolTip("Load selected automation for editing and review")
+        automation_buttons.addWidget(self.load_selected_btn)
+        
+        self.run_selected_btn = QPushButton("Run")
+        self.run_selected_btn.clicked.connect(self.run_selected_automation)
+        self.run_selected_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
+        self.run_selected_btn.setToolTip("Load and immediately execute the selected automation")
+        automation_buttons.addWidget(self.run_selected_btn)
+        
+        self.delete_automation_btn = QPushButton("Delete")
+        self.delete_automation_btn.clicked.connect(self.delete_selected_automation)
+        self.delete_automation_btn.setToolTip("Delete the selected automation permanently")
+        automation_buttons.addWidget(self.delete_automation_btn)
+        
+        automations_layout.addLayout(automation_buttons)
+        
+        # Automation details
+        self.automation_details = QLabel("Select an automation to see details")
+        self.automation_details.setWordWrap(True)
+        self.automation_details.setStyleSheet("color: gray; font-style: italic; padding: 10px;")
+        automations_layout.addWidget(self.automation_details)
+        
+        automations_layout.addStretch()
+        
+        sources_main_layout.addWidget(automations_right, 1)  # 1/3 of the space
+        
         self.tab_widget.addTab(sources_tab, "1. CSV Sources")
         
         # Tab 2: SQL Query
         sql_tab = QWidget()
         sql_layout = QVBoxLayout(sql_tab)
         
+        # SQL header with save/load buttons
+        sql_header = QHBoxLayout()
+        
         sql_title = QLabel("SQL Query (Optional)")
         sql_title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        sql_layout.addWidget(sql_title)
+        sql_header.addWidget(sql_title)
+        
+        sql_header.addStretch()
+        
+        # Save/Load automation buttons
+        self.save_automation_btn = QPushButton("Save Automation")
+        self.save_automation_btn.clicked.connect(self.save_automation)
+        sql_header.addWidget(self.save_automation_btn)
+        
+        self.load_automation_btn = QPushButton("Load Automation")
+        self.load_automation_btn.clicked.connect(self.load_automation)
+        sql_header.addWidget(self.load_automation_btn)
+        
+        sql_layout.addLayout(sql_header)
         
         sql_description = QLabel(
             "Write an SQL query to combine or transform your CSV data.\n"
@@ -411,8 +494,21 @@ class CSVAutomationDialog(QDialog):
         sql_description.setStyleSheet("color: gray;")
         sql_layout.addWidget(sql_description)
         
-        self.sql_editor = QPlainTextEdit()
-        self.sql_editor.setFont(QFont("Consolas", 10))
+        # Use enhanced SQL editor if available
+        if SQL_EDITOR_AVAILABLE:
+            self.sql_editor = SQLTextEdit()
+            self.sql_editor.setFont(QFont("Consolas", 10))
+            
+            # Apply syntax highlighting
+            self.sql_highlighter = SQLHighlighter(self.sql_editor.document())
+            
+            # Set up SQL completions if we have connection info
+            if self.connection_info:
+                self.update_sql_completions()
+        else:
+            self.sql_editor = QPlainTextEdit()
+            self.sql_editor.setFont(QFont("Consolas", 10))
+        
         self.sql_editor.setPlaceholderText(
             "Example:\n"
             "SELECT table1.*, table2.additional_column\n"
@@ -475,6 +571,16 @@ class CSVAutomationDialog(QDialog):
         
         layout.addLayout(button_layout)
         
+        # Initialize automations directory
+        self.automations_dir = "automations"
+        os.makedirs(self.automations_dir, exist_ok=True)
+        
+        # Load saved automations list
+        self.refresh_automations_list()
+        
+        # Connect list selection to show details
+        self.automations_list.itemSelectionChanged.connect(self.show_automation_details)
+        
         # Add initial CSV source
         self.add_csv_source()
     
@@ -483,6 +589,9 @@ class CSVAutomationDialog(QDialog):
         source_widget = CSVSourceWidget(self.sources_widget, len(self.csv_sources), self)
         self.csv_sources.append(source_widget)
         self.sources_layout.addWidget(source_widget)
+        
+        # Connect table name changes to update SQL completions
+        source_widget.table_line.textChanged.connect(self.update_sql_completions)
     
     def remove_source(self, index):
         """Remove a CSV source widget"""
@@ -498,14 +607,22 @@ class CSVAutomationDialog(QDialog):
         for i, source in enumerate(self.csv_sources):
             source.source_index = i
             source.title_label.setText(f"CSV Source {i + 1}")
+        
+        # Update SQL completions after removing source
+        self.update_sql_completions()
     
     def execute_automation(self):
         """Execute the CSV automation process"""
+        # Ensure we have sources first
+        if not self.csv_sources:
+            QMessageBox.warning(self, "Warning", "No CSV sources configured. Please add at least one source.")
+            return
+            
         # Validate sources
         valid_sources = [s for s in self.csv_sources if s.is_valid()]
         
         if not valid_sources:
-            QMessageBox.warning(self, "Warning", "Please configure at least one valid CSV source.")
+            QMessageBox.warning(self, "Warning", "At least one valid CSV source is required. Please check that all sources have valid folder paths and table names.")
             return
         
         # Check for duplicate table names
@@ -593,6 +710,426 @@ class CSVAutomationDialog(QDialog):
         
         QMessageBox.critical(self, "Error", f"Automation failed:\n{error_message}")
         self.progress_label.setText("Automation failed")
+    
+    def update_sql_completions(self):
+        """Update SQL completions with table names from sources"""
+        if not SQL_EDITOR_AVAILABLE or not hasattr(self.sql_editor, 'completer'):
+            return
+            
+        # Get table names from current sources
+        table_names = []
+        for source in self.csv_sources:
+            if source.is_valid():
+                config = source.get_config()
+                table_names.append(config['table_name'])
+        
+        # Update completions
+        if hasattr(self.sql_editor, 'update_completions'):
+            self.sql_editor.update_completions(table_names=table_names)
+    
+    def get_automation_config(self):
+        """Get the current automation configuration as a dictionary"""
+        config = {
+            'version': '1.0',
+            'created': datetime.now().isoformat(),
+            'description': 'CSV Automation Configuration',
+            'sources': [],
+            'sql_query': '',
+            'output_table': ''
+        }
+        
+        # Get sources configuration
+        for source in self.csv_sources:
+            if source.is_valid():
+                source_config = source.get_config()
+                config['sources'].append(source_config)
+        
+        # Get SQL query
+        if hasattr(self.sql_editor, 'toPlainText'):
+            config['sql_query'] = self.sql_editor.toPlainText().strip()
+        else:
+            config['sql_query'] = self.sql_editor.toPlainText().strip()
+        
+        # Get output table
+        config['output_table'] = self.output_table_line.text().strip()
+        
+        return config
+    
+    def set_automation_config(self, config):
+        """Load an automation configuration"""
+        try:
+            # Clear existing sources (but ensure we always have at least one)
+            while len(self.csv_sources) > 1:
+                self.remove_source(len(self.csv_sources) - 1)
+            
+            # Clear the first source
+            if self.csv_sources:
+                first_source = self.csv_sources[0]
+                first_source.folder_line.clear()
+                first_source.table_line.clear()
+                first_source.pattern_line.setText("*.csv")
+            
+            # Load sources
+            sources = config.get('sources', [])
+            if not sources:
+                # Just clear everything but don't return - user might want to add sources manually
+                pass
+                
+            for i, source_config in enumerate(sources):
+                # Use existing source or add new one
+                if i < len(self.csv_sources):
+                    source_widget = self.csv_sources[i]
+                else:
+                    self.add_csv_source()
+                    source_widget = self.csv_sources[-1]
+                
+                # Set source configuration
+                source_widget.folder_line.setText(source_config.get('folder_path', ''))
+                source_widget.table_line.setText(source_config.get('table_name', ''))
+                source_widget.pattern_line.setText(source_config.get('file_pattern', '*.csv'))
+                
+                # Trigger updates
+                source_widget.on_folder_changed()
+            
+            # Load SQL query
+            sql_query = config.get('sql_query', '')
+            if hasattr(self.sql_editor, 'setPlainText'):
+                self.sql_editor.setPlainText(sql_query)
+            else:
+                self.sql_editor.setPlainText(sql_query)
+            
+            # Load output table
+            self.output_table_line.setText(config.get('output_table', ''))
+            
+            # Update SQL completions
+            self.update_sql_completions()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load automation configuration:\n{str(e)}")
+    
+
+    
+    def load_automation(self):
+        """Load an automation configuration from a JSON file"""
+        try:
+            # Open file dialog
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Load CSV Automation",
+                "",
+                "JSON Files (*.json);;All Files (*)"
+            )
+            
+            if not file_path:
+                return
+            
+            with open(file_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # Validate configuration
+            if not isinstance(config, dict):
+                raise ValueError("Invalid automation file format")
+            
+            if 'sources' not in config:
+                raise ValueError("No sources found in automation file")
+            
+            # Load configuration
+            self.set_automation_config(config)
+            
+            QMessageBox.information(
+                self, 
+                "Success", 
+                f"Automation configuration loaded from:\n{file_path}\n\n"
+                f"Sources loaded: {len(config.get('sources', []))}\n"
+                f"SQL Query: {'Yes' if config.get('sql_query') else 'No'}\n"
+                f"Output Table: {config.get('output_table', 'Not specified')}"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load automation:\n{str(e)}")
+    
+    def refresh_automations_list(self):
+        """Refresh the list of saved automations"""
+        try:
+            self.automations_list.clear()
+            
+            # Find all JSON files in automations directory
+            json_files = glob.glob(os.path.join(self.automations_dir, "*.json"))
+            
+            if not json_files:
+                self.automations_list.addItem("No saved automations")
+                return
+            
+            # Sort by modification time (newest first)
+            json_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+            
+            for json_file in json_files:
+                try:
+                    # Try to load and validate the file
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                    
+                    # Create display name
+                    filename = os.path.basename(json_file)
+                    display_name = filename.replace('.json', '')
+                    
+                    # Add creation date if available
+                    if 'created' in config:
+                        try:
+                            created_date = datetime.fromisoformat(config['created'].replace('Z', '+00:00'))
+                            display_name += f" ({created_date.strftime('%Y-%m-%d %H:%M')})"
+                        except:
+                            pass
+                    
+                    # Add to list with full path as data
+                    item = QListWidgetItem(display_name)
+                    item.setData(Qt.ItemDataRole.UserRole, json_file)  # Store full path
+                    self.automations_list.addItem(item)
+                    
+                except Exception as e:
+                    # Skip invalid files
+                    logger.error(f"Error reading automation file {json_file}: {e}")
+                    continue
+        
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to refresh automations list:\n{str(e)}")
+    
+    def show_automation_details(self):
+        """Show details of the selected automation"""
+        try:
+            current_item = self.automations_list.currentItem()
+            if not current_item or current_item.text() == "No saved automations":
+                self.automation_details.setText("Select an automation to see details")
+                return
+            
+            file_path = current_item.data(Qt.ItemDataRole.UserRole)
+            if not file_path:
+                return
+            
+            # Load automation config
+            with open(file_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # Build details text
+            details = []
+            details.append(f"<b>File:</b> {os.path.basename(file_path)}")
+            
+            if 'created' in config:
+                details.append(f"<b>Created:</b> {config['created']}")
+            
+            sources_count = len(config.get('sources', []))
+            details.append(f"<b>Sources:</b> {sources_count}")
+            
+            for i, source in enumerate(config.get('sources', []), 1):
+                table_name = source.get('table_name', 'Unknown')
+                folder = source.get('folder_path', 'Unknown')
+                details.append(f"  {i}. {table_name} ← {os.path.basename(folder)}")
+            
+            if config.get('sql_query'):
+                query_preview = config['sql_query'][:100]
+                if len(config['sql_query']) > 100:
+                    query_preview += "..."
+                details.append(f"<b>SQL Query:</b> {query_preview}")
+            else:
+                details.append(f"<b>SQL Query:</b> None")
+            
+            if config.get('output_table'):
+                details.append(f"<b>Output Table:</b> {config['output_table']}")
+            
+            self.automation_details.setText("<br/>".join(details))
+            
+        except Exception as e:
+            self.automation_details.setText(f"Error reading automation: {str(e)}")
+    
+    def load_selected_automation(self):
+        """Load the selected automation from the list"""
+        try:
+            current_item = self.automations_list.currentItem()
+            if not current_item or current_item.text() == "No saved automations":
+                QMessageBox.warning(self, "Warning", "Please select an automation to load.")
+                return
+            
+            file_path = current_item.data(Qt.ItemDataRole.UserRole)
+            if not file_path:
+                return
+            
+            # Load and apply the configuration
+            with open(file_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            self.set_automation_config(config)
+            
+            QMessageBox.information(
+                self,
+                "Success",
+                f"Automation loaded successfully!\n\n"
+                f"Sources: {len(config.get('sources', []))}\n"
+                f"SQL Query: {'Yes' if config.get('sql_query') else 'No'}\n"
+                f"Output Table: {config.get('output_table', 'Not specified')}"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load selected automation:\n{str(e)}")
+    
+    def run_selected_automation(self):
+        """Load and immediately run the selected automation"""
+        try:
+            current_item = self.automations_list.currentItem()
+            if not current_item or current_item.text() == "No saved automations":
+                QMessageBox.warning(self, "Warning", "Please select an automation to run.")
+                return
+            
+            file_path = current_item.data(Qt.ItemDataRole.UserRole)
+            if not file_path:
+                return
+            
+            # Load configuration first
+            with open(file_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            # Show confirmation dialog with automation details
+            sources_count = len(config.get('sources', []))
+            has_sql = bool(config.get('sql_query', '').strip())
+            output_table = config.get('output_table', '')
+            
+            confirmation_text = (
+                f"Are you sure you want to run this automation?\n\n"
+                f"File: {os.path.basename(file_path)}\n"
+                f"Sources: {sources_count}\n"
+                f"SQL Query: {'Yes' if has_sql else 'No'}\n"
+                f"Output Table: {output_table if output_table else 'Not specified'}"
+            )
+            
+            reply = QMessageBox.question(
+                self,
+                "Run Automation",
+                confirmation_text,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # Load the configuration
+                self.set_automation_config(config)
+                
+                # Switch to progress view
+                self.tab_widget.setCurrentIndex(0)
+                
+                # Execute immediately
+                self.execute_automation()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to run selected automation:\n{str(e)}")
+    
+    def delete_selected_automation(self):
+        """Delete the selected automation file"""
+        try:
+            current_item = self.automations_list.currentItem()
+            if not current_item or current_item.text() == "No saved automations":
+                QMessageBox.warning(self, "Warning", "Please select an automation to delete.")
+                return
+            
+            file_path = current_item.data(Qt.ItemDataRole.UserRole)
+            if not file_path:
+                return
+            
+            filename = os.path.basename(file_path)
+            
+            # Confirm deletion
+            reply = QMessageBox.question(
+                self,
+                "Confirm Deletion",
+                f"Are you sure you want to delete this automation?\n\n{filename}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                os.remove(file_path)
+                self.refresh_automations_list()
+                self.automation_details.setText("Automation deleted successfully")
+                
+                QMessageBox.information(self, "Success", f"Automation '{filename}' deleted successfully.")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to delete automation:\n{str(e)}")
+    
+    def save_automation(self):
+        """Save the current automation configuration automatically to the automations directory"""
+        try:
+            config = self.get_automation_config()
+            
+            if not config['sources']:
+                QMessageBox.warning(self, "Warning", "No valid sources configured to save.")
+                return
+            
+            # Ask for automation name
+            default_name = f"automation_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            automation_name, ok = QInputDialog.getText(
+                self,
+                "Save Automation",
+                "Enter a name for this automation:",
+                QLineEdit.EchoMode.Normal,
+                default_name
+            )
+            
+            if not ok or not automation_name.strip():
+                return  # User cancelled or empty name
+            
+            # Clean the name for filename
+            automation_name = automation_name.strip()
+            # Remove invalid filename characters
+            import re
+            automation_name = re.sub(r'[<>:"/\\|?*]', '_', automation_name)
+            
+            # Ensure .json extension
+            if not automation_name.endswith('.json'):
+                automation_name += '.json'
+            
+            # Save to automations directory
+            file_path = os.path.join(self.automations_dir, automation_name)
+            
+            # Check if file exists
+            if os.path.exists(file_path):
+                reply = QMessageBox.question(
+                    self,
+                    "File Exists",
+                    f"An automation named '{automation_name}' already exists.\n\nDo you want to overwrite it?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.No:
+                    return
+            
+            # Save the automation
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            
+            # Refresh the automations list
+            self.refresh_automations_list()
+            
+            # Select the newly saved automation in the list
+            self.select_automation_by_name(automation_name)
+            
+            QMessageBox.information(
+                self, 
+                "Success", 
+                f"Automation '{automation_name}' saved successfully!\n\nIt's now available in the Saved Automations panel."
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save automation:\n{str(e)}")
+    
+    def select_automation_by_name(self, filename):
+        """Select an automation in the list by filename"""
+        try:
+            for i in range(self.automations_list.count()):
+                item = self.automations_list.item(i)
+                if item and filename in item.text():
+                    self.automations_list.setCurrentItem(item)
+                    break
+        except:
+            pass  # If selection fails, it's not critical
 
 
 def show_csv_automation_dialog(parent=None, connection=None, connection_info=None):

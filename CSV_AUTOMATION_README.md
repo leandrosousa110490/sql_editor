@@ -24,12 +24,21 @@ You can open CSV Automation in several ways:
 ### 2. Configure CSV Sources
 
 **Tab 1: CSV Sources**
-- Click "Add CSV Source" to add a new data source
-- For each source:
-  - **Browse**: Select the folder containing your CSV files
-  - **Table Name**: Enter a unique name for this data source (auto-suggested based on folder name)
-  - **File Pattern**: Specify which files to include (default: `*.csv`)
-  - **Preview**: See which files will be processed
+- **Left Panel - CSV Sources**:
+  - Click "Add CSV Source" to add a new data source
+  - For each source:
+    - **Browse**: Select the folder containing your CSV files
+    - **Table Name**: Enter a unique name for this data source (auto-suggested based on folder name)
+    - **File Pattern**: Specify which files to include (default: `*.csv`)
+    - **Preview**: See which files will be processed
+
+- **Right Panel - Saved Automations**:
+  - View all your saved automation configurations
+  - **Double-click** or **Load** button to load an automation for editing
+  - **Run** button (green) to load and immediately execute an automation
+  - **Delete** unwanted automations
+  - **Refresh** to update the list
+  - **Details Preview** shows automation information when selected
 
 ### 3. Write SQL Query (Optional)
 
@@ -37,6 +46,10 @@ You can open CSV Automation in several ways:
 - Write an SQL query to combine or transform your CSV data
 - Reference tables by the names you specified in Tab 1
 - Leave empty to simply load CSV sources as separate tables
+- **Enhanced Features**:
+  - **SQL Syntax Highlighting**: Same as main application
+  - **Auto-completion**: Table names from your sources are suggested
+  - **Save/Load**: Save your automation configurations to JSON files
 
 ### 4. Configure Output
 
@@ -80,12 +93,63 @@ WHERE s.sale_date >= '2024-01-01'
 
 4. **Execute:** The automation will merge CSV files, load tables, execute SQL, and create the final table.
 
+## Integrated Automation Management
+
+### Automatic Discovery
+- All saved automations appear in the **Saved Automations** panel (Tab 1)
+- Shows creation date and time for easy identification
+- Automatically scans the `automations/` directory
+
+### Quick Actions
+- **Double-click** any automation to load it for editing
+- **Load** button loads selected automation for configuration review
+- **Run** button (green) loads and immediately executes the selected automation
+- **Delete** button removes automations with confirmation
+- **Refresh** button updates the list
+
+### Automation Details
+- Click any automation to see details:
+  - File name and creation date
+  - Number of sources and their table names
+  - SQL query preview (first 100 characters)
+  - Output table name
+
+### Saving New Automations
+- **Save Automation** button in SQL Query tab
+- Simply enter a name for your automation (no file path needed)
+- **Automatically saved** to `automations/` directory
+- **Instantly appears** in the Saved Automations panel
+- **Auto-selected** after saving for immediate use
+
+### Advanced Loading
+- **Load Automation** button for importing from other locations
+- Useful for sharing automations between team members
+
+### JSON Format Example
+```json
+{
+  "version": "1.0",
+  "created": "2024-12-25T18:30:00",
+  "sources": [
+    {
+      "folder_path": "C:\\data\\sales",
+      "table_name": "sales_data",
+      "file_pattern": "*.csv"
+    }
+  ],
+  "sql_query": "SELECT * FROM sales_data WHERE amount > 1000",
+  "output_table": "high_value_sales"
+}
+```
+
 ## Tips and Best Practices
 
 1. **Table Naming**: Use descriptive, SQL-compatible names (letters, numbers, underscores only)
 2. **File Patterns**: Be specific with patterns to avoid processing unwanted files
 3. **Testing**: Start with a small subset of files to test your workflow
 4. **Schema Consistency**: Ensure CSV files within each source have consistent column structures
+5. **Save Configurations**: Save complex automations for reuse
+6. **Version Control**: Keep your automation JSON files in version control for team sharing
 
 ## Troubleshooting
 
