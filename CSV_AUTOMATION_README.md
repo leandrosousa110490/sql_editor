@@ -4,9 +4,11 @@ The CSV Automation feature provides a user-friendly way to process multiple CSV 
 
 ## Features
 
-- **Multiple CSV Sources**: Add multiple folders containing CSV files as separate data sources
+- **Multiple CSV Sources**: Add multiple folders containing CSV files OR single CSV files as separate data sources
+- **Flexible Input Modes**: Choose between "Folder (Multiple Files)" or "Single File" for each source
 - **Table Naming**: Specify custom table names for each CSV source
-- **File Pattern Matching**: Use patterns like `*.csv`, `sales_*.csv`, or `data_2024_*.csv` to filter files
+- **File Pattern Matching**: Use patterns like `*.csv`, `sales_*.csv`, or `data_2024_*.csv` to filter files (folder mode)
+- **Pure Python Processing**: Single file processing uses pure Python pandas for maximum compatibility
 - **SQL Transformations**: Write custom SQL queries to combine, filter, or transform your data
 - **Database Integration**: Automatically loads all data into your connected DuckDB database
 - **Progress Tracking**: Real-time progress updates during processing
@@ -27,10 +29,11 @@ You can open CSV Automation in several ways:
 - **Left Panel - CSV Sources**:
   - Click "Add CSV Source" to add a new data source
   - For each source:
-    - **Browse**: Select the folder containing your CSV files
-    - **Table Name**: Enter a unique name for this data source (auto-suggested based on folder name)
-    - **File Pattern**: Specify which files to include (default: `*.csv`)
-    - **Preview**: See which files will be processed
+    - **Mode Selection**: Choose between "Folder (Multiple Files)" or "Single File"
+    - **Browse**: Select the folder containing CSV files OR select a single CSV file
+    - **Table Name**: Enter a unique name for this data source (auto-suggested based on folder/file name)
+    - **File Pattern**: Specify which files to include (folder mode only, default: `*.csv`)
+    - **Preview**: See which files will be processed or file details for single files
 
 - **Right Panel - Saved Automations**:
   - View all your saved automation configurations
@@ -65,16 +68,16 @@ You can open CSV Automation in several ways:
 
 ## Example Workflow
 
-Let's say you have three folders of CSV files you want to combine:
+Let's say you want to combine data from multiple sources:
 
-1. **Sales Data** (`/data/sales/`) - Contains daily sales files
-2. **Customer Data** (`/data/customers/`) - Contains customer information
+1. **Sales Data** (`/data/sales/`) - Folder containing daily sales files
+2. **Customer Master** (`/data/customer_master.csv`) - Single customer reference file
 
 **Step-by-step:**
 
 1. **Add Sources:**
-   - Source 1: Folder = `/data/sales/`, Table = `sales`, Pattern = `*.csv`
-   - Source 2: Folder = `/data/customers/`, Table = `customers`, Pattern = `*.csv`
+   - Source 1: Mode = "Folder", Path = `/data/sales/`, Table = `sales`, Pattern = `*.csv`
+   - Source 2: Mode = "Single File", Path = `/data/customer_master.csv`, Table = `customers`
 
 2. **Write SQL Query:**
 ```sql
@@ -132,24 +135,51 @@ WHERE s.sale_date >= '2024-01-01'
   "created": "2024-12-25T18:30:00",
   "sources": [
     {
+      "mode": "folder",
       "folder_path": "C:\\data\\sales",
       "table_name": "sales_data",
       "file_pattern": "*.csv"
+    },
+    {
+      "mode": "file",
+      "file_path": "C:\\data\\customer_master.csv",
+      "table_name": "customers"
     }
   ],
-  "sql_query": "SELECT * FROM sales_data WHERE amount > 1000",
-  "output_table": "high_value_sales"
+  "sql_query": "SELECT s.*, c.customer_name FROM sales_data s LEFT JOIN customers c ON s.customer_id = c.id",
+  "output_table": "enriched_sales"
 }
 ```
+
+## Single File vs Folder Mode
+
+### When to Use Single File Mode
+- **Reference Data**: Customer lists, product catalogs, lookup tables
+- **Master Files**: Large single files that don't need merging
+- **One-off Processing**: Individual CSV files that need processing
+- **Pure Python**: When you need maximum compatibility with pandas processing
+
+### When to Use Folder Mode  
+- **Time Series Data**: Daily/monthly files that need combining
+- **Batch Processing**: Multiple files with the same structure
+- **Log Files**: Multiple log files that need aggregation
+- **Distributed Data**: When data is split across multiple files
+
+### Key Differences
+- **Single File**: Uses pure Python pandas for processing (maximum compatibility)
+- **Folder Mode**: Uses the csv_merger functionality for efficient batch processing
+- **File Pattern**: Only available in folder mode for filtering files
+- **Preview**: Single file shows file size and column count; folder shows file list
 
 ## Tips and Best Practices
 
 1. **Table Naming**: Use descriptive, SQL-compatible names (letters, numbers, underscores only)
-2. **File Patterns**: Be specific with patterns to avoid processing unwanted files
-3. **Testing**: Start with a small subset of files to test your workflow
-4. **Schema Consistency**: Ensure CSV files within each source have consistent column structures
-5. **Save Configurations**: Save complex automations for reuse
-6. **Version Control**: Keep your automation JSON files in version control for team sharing
+2. **File Patterns**: Be specific with patterns to avoid processing unwanted files (folder mode)
+3. **Mode Selection**: Use single file for reference data, folder mode for time series data
+4. **Testing**: Start with a small subset of files to test your workflow
+5. **Schema Consistency**: Ensure CSV files within each source have consistent column structures
+6. **Save Configurations**: Save complex automations for reuse
+7. **Version Control**: Keep your automation JSON files in version control for team sharing
 
 ## Troubleshooting
 

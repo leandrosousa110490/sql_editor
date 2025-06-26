@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog,
     QProgressBar, QTextEdit, QGroupBox, QListWidget, QLineEdit, QTabWidget, 
     QWidget, QScrollArea, QFormLayout, QPlainTextEdit, QFrame, QMessageBox,
-    QListWidgetItem, QInputDialog
+    QListWidgetItem, QInputDialog, QComboBox
 )
 from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtGui import QFont
@@ -58,6 +58,12 @@ class CSVSourceWidget(QWidget):
         
         header_layout.addStretch()
         
+        # Mode toggle
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Folder (Multiple Files)", "Single File"])
+        self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
+        header_layout.addWidget(self.mode_combo)
+        
         self.remove_btn = QPushButton("Remove")
         self.remove_btn.clicked.connect(self.request_remove)
         header_layout.addWidget(self.remove_btn)
@@ -65,78 +71,156 @@ class CSVSourceWidget(QWidget):
         layout.addWidget(header_frame)
         
         # Configuration form
-        form_layout = QFormLayout()
+        self.form_layout = QFormLayout()
         
-        # Folder selection
-        folder_layout = QHBoxLayout()
-        self.folder_line = QLineEdit()
-        self.folder_line.setPlaceholderText("Select CSV folder...")
-        self.folder_line.textChanged.connect(self.on_folder_changed)
+        # Path selection (folder or file depending on mode)
+        path_layout = QHBoxLayout()
+        self.path_line = QLineEdit()
+        self.path_line.setPlaceholderText("Select CSV folder...")
+        self.path_line.textChanged.connect(self.on_path_changed)
         
         self.browse_btn = QPushButton("Browse")
-        self.browse_btn.clicked.connect(self.browse_folder)
+        self.browse_btn.clicked.connect(self.browse_path)
         
-        folder_layout.addWidget(self.folder_line)
-        folder_layout.addWidget(self.browse_btn)
-        form_layout.addRow("CSV Folder:", folder_layout)
+        path_layout.addWidget(self.path_line)
+        path_layout.addWidget(self.browse_btn)
+        
+        # Store label references for dynamic updating
+        self.path_label = QLabel("CSV Folder:")
+        self.form_layout.addRow(self.path_label, path_layout)
         
         # Table name
         self.table_line = QLineEdit()
         self.table_line.setPlaceholderText("Enter table name")
-        form_layout.addRow("Table Name:", self.table_line)
+        self.form_layout.addRow("Table Name:", self.table_line)
         
-        # File pattern
+        # File pattern (only for folder mode)
         self.pattern_line = QLineEdit("*.csv")
-        form_layout.addRow("File Pattern:", self.pattern_line)
+        self.pattern_label = QLabel("File Pattern:")
+        self.form_layout.addRow(self.pattern_label, self.pattern_line)
         
-        layout.addLayout(form_layout)
+        layout.addLayout(self.form_layout)
         
         # File preview
         self.file_list = QListWidget()
         self.file_list.setMaximumHeight(80)
-        layout.addWidget(QLabel("Files Preview:"))
+        self.preview_title = QLabel("Files Preview:")
+        layout.addWidget(self.preview_title)
         layout.addWidget(self.file_list)
         
         self.preview_label = QLabel("No folder selected")
         self.preview_label.setStyleSheet("color: gray;")
         layout.addWidget(self.preview_label)
+        
+        # Set initial mode
+        self.current_mode = "folder"
+        self.update_ui_for_mode()
     
-    def browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select CSV Folder")
-        if folder:
-            self.folder_line.setText(folder)
+    def on_mode_changed(self):
+        """Handle mode change between folder and single file"""
+        current_text = self.mode_combo.currentText()
+        if "Single File" in current_text:
+            self.current_mode = "file"
+        else:
+            self.current_mode = "folder"
+        self.update_ui_for_mode()
+        
+    def update_ui_for_mode(self):
+        """Update UI elements based on current mode"""
+        if self.current_mode == "file":
+            # Single file mode
+            self.path_label.setText("CSV File:")
+            self.path_line.setPlaceholderText("Select CSV file...")
+            self.pattern_line.setVisible(False)
+            self.pattern_label.setVisible(False)
+            self.preview_title.setText("File Preview:")
+        else:
+            # Folder mode
+            self.path_label.setText("CSV Folder:")
+            self.path_line.setPlaceholderText("Select CSV folder...")
+            self.pattern_line.setVisible(True)
+            self.pattern_label.setVisible(True)
+            self.preview_title.setText("Files Preview:")
+        
+        # Update preview without clearing if we're loading configuration
+        self.update_preview()
     
-    def on_folder_changed(self):
-        folder_path = self.folder_line.text()
-        if folder_path and os.path.exists(folder_path):
-            self.update_file_preview()
+    def browse_path(self):
+        """Browse for folder or file depending on mode"""
+        if self.current_mode == "file":
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, 
+                "Select CSV File", 
+                "", 
+                "CSV Files (*.csv);;All Files (*)"
+            )
+            if file_path:
+                self.path_line.setText(file_path)
+        else:
+            folder = QFileDialog.getExistingDirectory(self, "Select CSV Folder")
+            if folder:
+                self.path_line.setText(folder)
+    
+    def on_path_changed(self):
+        """Handle path change for both folder and file modes"""
+        path = self.path_line.text()
+        if path and os.path.exists(path):
+            self.update_preview()
             # Auto-suggest table name
             if not self.table_line.text():
-                suggested_name = os.path.basename(folder_path.rstrip('/\\'))
+                if self.current_mode == "file":
+                    # Use filename without extension
+                    suggested_name = os.path.splitext(os.path.basename(path))[0]
+                else:
+                    # Use folder name
+                    suggested_name = os.path.basename(path.rstrip('/\\'))
                 self.table_line.setText(self.clean_table_name(suggested_name))
     
-    def update_file_preview(self):
+    def update_preview(self):
+        """Update preview for both folder and file modes"""
         self.file_list.clear()
-        folder_path = self.folder_line.text()
+        path = self.path_line.text()
         
-        if not folder_path or not os.path.exists(folder_path):
-            self.preview_label.setText("Invalid folder path")
+        if not path or not os.path.exists(path):
+            self.preview_label.setText("Invalid path")
             return
         
-        pattern = self.pattern_line.text() or "*.csv"
-        csv_files = glob.glob(os.path.join(folder_path, pattern))
-        
-        if csv_files:
-            for file_path in sorted(csv_files)[:5]:  # Show max 5 files
-                filename = os.path.basename(file_path)
+        if self.current_mode == "file":
+            # Single file mode
+            if path.lower().endswith('.csv'):
+                filename = os.path.basename(path)
                 self.file_list.addItem(filename)
-            
-            if len(csv_files) > 5:
-                self.file_list.addItem(f"... and {len(csv_files) - 5} more files")
-            
-            self.preview_label.setText(f"Found {len(csv_files)} CSV files")
+                
+                # Try to get file info
+                try:
+                    file_size = os.path.getsize(path)
+                    size_mb = file_size / (1024 * 1024)
+                    
+                    # Try to read first few rows to get column info
+                    df_sample = pd.read_csv(path, nrows=0)  # Just headers
+                    col_count = len(df_sample.columns)
+                    
+                    self.preview_label.setText(f"File: {filename} ({size_mb:.1f} MB, {col_count} columns)")
+                except Exception as e:
+                    self.preview_label.setText(f"File: {filename} (Unable to read: {str(e)})")
+            else:
+                self.preview_label.setText("Selected file is not a CSV file")
         else:
-            self.preview_label.setText("No CSV files found")
+            # Folder mode
+            pattern = self.pattern_line.text() or "*.csv"
+            csv_files = glob.glob(os.path.join(path, pattern))
+            
+            if csv_files:
+                for file_path in sorted(csv_files)[:5]:  # Show max 5 files
+                    filename = os.path.basename(file_path)
+                    self.file_list.addItem(filename)
+                
+                if len(csv_files) > 5:
+                    self.file_list.addItem(f"... and {len(csv_files) - 5} more files")
+                
+                self.preview_label.setText(f"Found {len(csv_files)} CSV files")
+            else:
+                self.preview_label.setText("No CSV files found")
     
     def clean_table_name(self, name):
         import re
@@ -150,17 +234,29 @@ class CSVSourceWidget(QWidget):
             self.dialog.remove_source(self.source_index)
     
     def get_config(self):
-        return {
-            'folder_path': self.folder_line.text(),
+        config = {
             'table_name': self.table_line.text(),
-            'file_pattern': self.pattern_line.text() or "*.csv"
+            'mode': self.current_mode
         }
+        
+        if self.current_mode == "file":
+            config['file_path'] = self.path_line.text()
+        else:
+            config['folder_path'] = self.path_line.text()
+            config['file_pattern'] = self.pattern_line.text() or "*.csv"
+        
+        return config
     
     def is_valid(self):
         config = self.get_config()
-        return (config['folder_path'] and 
-                os.path.exists(config['folder_path']) and 
-                config['table_name'])
+        path_exists = False
+        
+        if self.current_mode == "file":
+            path_exists = config.get('file_path') and os.path.exists(config['file_path'])
+        else:
+            path_exists = config.get('folder_path') and os.path.exists(config['folder_path'])
+        
+        return path_exists and config['table_name']
 
 
 class CSVAutomationWorker(QThread):
@@ -181,65 +277,110 @@ class CSVAutomationWorker(QThread):
     def cancel(self):
         self.cancel_requested = True
     
-    def append_csv_files_with_progress(self, input_folder, output_file, file_pattern, source_name):
-        """Modified version of append_csv_files with progress reporting"""
+    def process_csv_source_with_progress(self, source_config, output_file, source_name):
+        """Process CSV source (folder or single file) with progress reporting"""
         
-        # Find all CSV files
-        csv_pattern = os.path.join(input_folder, file_pattern)
-        csv_files = glob.glob(csv_pattern)
-        
-        if not csv_files:
-            raise FileNotFoundError(f"No CSV files found in '{input_folder}' matching pattern '{file_pattern}'")
-        
-        self.progress.emit(
-            self.current_progress,
-            f"Found {len(csv_files)} files in {source_name}. Starting merge..."
-        )
-        
-        # Read and collect all DataFrames
-        dataframes = []
-        total_files = len(csv_files)
-        
-        for i, csv_file in enumerate(csv_files):
-            if self.cancel_requested:
-                return None
-                
+        if source_config.get('mode') == 'file':
+            # Single file processing
+            file_path = source_config.get('file_path')
+            if not file_path or not os.path.exists(file_path):
+                raise FileNotFoundError(f"CSV file not found: '{file_path}'")
+            
+            self.progress.emit(
+                self.current_progress,
+                f"Processing single file: {os.path.basename(file_path)}"
+            )
+            
             try:
-                # Update progress for each file
-                file_progress = int((i / total_files) * 30)  # 30% of progress for this source
+                # Read the single CSV file
                 self.progress.emit(
-                    self.current_progress + file_progress,
-                    f"Reading file {i+1}/{total_files}: {os.path.basename(csv_file)}"
+                    self.current_progress + 10,
+                    f"Reading {os.path.basename(file_path)}..."
                 )
                 
-                df = pd.read_csv(csv_file, encoding='utf-8')
-                df['_source_file'] = os.path.basename(csv_file)
-                dataframes.append(df)
+                df = pd.read_csv(file_path, encoding='utf-8')
+                df['_source_file'] = os.path.basename(file_path)
+                
+                self.progress.emit(
+                    self.current_progress + 25,
+                    f"Processing {len(df):,} rows from {source_name}..."
+                )
+                
+                # Save to output file
+                self.progress.emit(
+                    self.current_progress + 28,
+                    f"Saving data for {source_name}..."
+                )
+                
+                df.to_csv(output_file, index=False, encoding='utf-8')
+                
+                return df
                 
             except Exception as e:
-                logger.error(f"Error reading {csv_file}: {str(e)}")
-                continue
+                logger.error(f"Error reading {file_path}: {str(e)}")
+                raise ValueError(f"Failed to read CSV file: {str(e)}")
         
-        if not dataframes:
-            raise ValueError("No CSV files could be successfully read")
-        
-        # Merge DataFrames
-        self.progress.emit(
-            self.current_progress + 25,
-            f"Merging {len(dataframes)} files for {source_name}..."
-        )
-        
-        merged_df = pd.concat(dataframes, ignore_index=True, sort=False)
-        
-        # Save to output file
-        self.progress.emit(
-            self.current_progress + 28,
-            f"Saving merged data for {source_name}..."
-        )
-        
-        merged_df.to_csv(output_file, index=False, encoding='utf-8')
-        
-        return merged_df
+        else:
+            # Folder processing (original logic)
+            input_folder = source_config.get('folder_path')
+            file_pattern = source_config.get('file_pattern', '*.csv')
+            
+            # Find all CSV files
+            csv_pattern = os.path.join(input_folder, file_pattern)
+            csv_files = glob.glob(csv_pattern)
+            
+            if not csv_files:
+                raise FileNotFoundError(f"No CSV files found in '{input_folder}' matching pattern '{file_pattern}'")
+            
+            self.progress.emit(
+                self.current_progress,
+                f"Found {len(csv_files)} files in {source_name}. Starting merge..."
+            )
+            
+            # Read and collect all DataFrames
+            dataframes = []
+            total_files = len(csv_files)
+            
+            for i, csv_file in enumerate(csv_files):
+                if self.cancel_requested:
+                    return None
+                    
+                try:
+                    # Update progress for each file
+                    file_progress = int((i / total_files) * 30)  # 30% of progress for this source
+                    self.progress.emit(
+                        self.current_progress + file_progress,
+                        f"Reading file {i+1}/{total_files}: {os.path.basename(csv_file)}"
+                    )
+                    
+                    df = pd.read_csv(csv_file, encoding='utf-8')
+                    df['_source_file'] = os.path.basename(csv_file)
+                    dataframes.append(df)
+                    
+                except Exception as e:
+                    logger.error(f"Error reading {csv_file}: {str(e)}")
+                    continue
+            
+            if not dataframes:
+                raise ValueError("No CSV files could be successfully read")
+            
+            # Merge DataFrames
+            self.progress.emit(
+                self.current_progress + 25,
+                f"Merging {len(dataframes)} files for {source_name}..."
+            )
+            
+            merged_df = pd.concat(dataframes, ignore_index=True, sort=False)
+            
+            # Save to output file
+            self.progress.emit(
+                self.current_progress + 28,
+                f"Saving merged data for {source_name}..."
+            )
+            
+            merged_df.to_csv(output_file, index=False, encoding='utf-8')
+            
+            return merged_df
     
     def run(self):
         try:
@@ -273,11 +414,10 @@ class CSVAutomationWorker(QThread):
                 temp_output = f"temp_{source_config['table_name']}.csv"
                 
                 try:
-                    # Use our progress-enabled CSV merger
-                    df = self.append_csv_files_with_progress(
-                        input_folder=source_config['folder_path'],
+                    # Use our progress-enabled CSV processor (handles both folder and single file)
+                    df = self.process_csv_source_with_progress(
+                        source_config=source_config,
                         output_file=temp_output,
-                        file_pattern=source_config['file_pattern'],
                         source_name=source_config['table_name']
                     )
                     
@@ -293,11 +433,21 @@ class CSVAutomationWorker(QThread):
                     # Load into DuckDB
                     table_name = source_config['table_name']
                     self.connection.execute(f"DROP TABLE IF EXISTS {table_name}")
-                    self.connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM read_csv_auto('{temp_output}')")
+                    
+                    # Use absolute path for temp file to avoid path issues
+                    temp_output_abs = os.path.abspath(temp_output)
+                    
+                    # Ensure temp file exists before trying to load it
+                    if not os.path.exists(temp_output_abs):
+                        raise FileNotFoundError(f"Temp file not found: {temp_output_abs}")
+                    
+                    # Load with proper path escaping
+                    escaped_path = temp_output_abs.replace('\\', '\\\\').replace("'", "''")
+                    self.connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM read_csv_auto('{escaped_path}')")
                     
                     # Clean up temp file
-                    if os.path.exists(temp_output):
-                        os.remove(temp_output)
+                    if os.path.exists(temp_output_abs):
+                        os.remove(temp_output_abs)
                     
                     results['sources_processed'] += 1
                     results['total_rows'] += len(df)
@@ -467,25 +617,10 @@ class CSVAutomationDialog(QDialog):
         sql_tab = QWidget()
         sql_layout = QVBoxLayout(sql_tab)
         
-        # SQL header with save/load buttons
-        sql_header = QHBoxLayout()
-        
+        # SQL header
         sql_title = QLabel("SQL Query (Optional)")
         sql_title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        sql_header.addWidget(sql_title)
-        
-        sql_header.addStretch()
-        
-        # Save/Load automation buttons
-        self.save_automation_btn = QPushButton("Save Automation")
-        self.save_automation_btn.clicked.connect(self.save_automation)
-        sql_header.addWidget(self.save_automation_btn)
-        
-        self.load_automation_btn = QPushButton("Load Automation")
-        self.load_automation_btn.clicked.connect(self.load_automation)
-        sql_header.addWidget(self.load_automation_btn)
-        
-        sql_layout.addLayout(sql_header)
+        sql_layout.addWidget(sql_title)
         
         sql_description = QLabel(
             "Write an SQL query to combine or transform your CSV data.\n"
@@ -555,6 +690,13 @@ class CSVAutomationDialog(QDialog):
         
         # Buttons
         button_layout = QHBoxLayout()
+        
+        # Save automation button
+        self.save_automation_btn = QPushButton("Save Automation")
+        self.save_automation_btn.clicked.connect(self.save_automation)
+        button_layout.addWidget(self.save_automation_btn)
+        
+        button_layout.addStretch()  # Add some space between groups
         
         self.execute_btn = QPushButton("Execute Automation")
         self.execute_btn.clicked.connect(self.execute_automation)
@@ -765,15 +907,22 @@ class CSVAutomationDialog(QDialog):
             # Clear the first source
             if self.csv_sources:
                 first_source = self.csv_sources[0]
-                first_source.folder_line.clear()
+                first_source.path_line.clear()
                 first_source.table_line.clear()
                 first_source.pattern_line.setText("*.csv")
+                # Reset to folder mode by default
+                first_source.mode_combo.setCurrentText("Folder (Multiple Files)")
+                first_source.current_mode = 'folder'
+                first_source.update_ui_for_mode()
             
             # Load sources
             sources = config.get('sources', [])
             if not sources:
                 # Just clear everything but don't return - user might want to add sources manually
-                pass
+                # Make sure we have at least one empty source to work with
+                if not self.csv_sources:
+                    self.add_csv_source()
+                return  # No sources to load, but we have a clean slate
                 
             for i, source_config in enumerate(sources):
                 # Use existing source or add new one
@@ -784,12 +933,24 @@ class CSVAutomationDialog(QDialog):
                     source_widget = self.csv_sources[-1]
                 
                 # Set source configuration
-                source_widget.folder_line.setText(source_config.get('folder_path', ''))
                 source_widget.table_line.setText(source_config.get('table_name', ''))
-                source_widget.pattern_line.setText(source_config.get('file_pattern', '*.csv'))
+                
+                # Handle mode-specific configuration
+                mode = source_config.get('mode', 'folder')  # Default to folder for backward compatibility
+                if mode == 'file':
+                    source_widget.mode_combo.setCurrentText("Single File")
+                    source_widget.current_mode = 'file'
+                    source_widget.update_ui_for_mode()
+                    source_widget.path_line.setText(source_config.get('file_path', ''))
+                else:
+                    source_widget.mode_combo.setCurrentText("Folder (Multiple Files)")
+                    source_widget.current_mode = 'folder'
+                    source_widget.update_ui_for_mode()
+                    source_widget.path_line.setText(source_config.get('folder_path', ''))
+                    source_widget.pattern_line.setText(source_config.get('file_pattern', '*.csv'))
                 
                 # Trigger updates
-                source_widget.on_folder_changed()
+                source_widget.on_path_changed()
             
             # Load SQL query
             sql_query = config.get('sql_query', '')
@@ -922,8 +1083,22 @@ class CSVAutomationDialog(QDialog):
             
             for i, source in enumerate(config.get('sources', []), 1):
                 table_name = source.get('table_name', 'Unknown')
-                folder = source.get('folder_path', 'Unknown')
-                details.append(f"  {i}. {table_name} ← {os.path.basename(folder)}")
+                
+                # Handle both file and folder modes
+                if source.get('mode') == 'file':
+                    file_path = source.get('file_path', 'Unknown')
+                    if file_path != 'Unknown':
+                        source_display = os.path.basename(file_path)
+                    else:
+                        source_display = 'Unknown file'
+                else:
+                    folder_path = source.get('folder_path', 'Unknown')
+                    if folder_path != 'Unknown':
+                        source_display = os.path.basename(folder_path)
+                    else:
+                        source_display = 'Unknown folder'
+                
+                details.append(f"  {i}. {table_name} ← {source_display}")
             
             if config.get('sql_query'):
                 query_preview = config['sql_query'][:100]

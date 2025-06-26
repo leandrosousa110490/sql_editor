@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "created": "2025-06-26T17:59:29.012566",
+  "description": "CSV Automation Configuration",
+  "sources": [
+    {
+      "table_name": "test_data_10m",
+      "mode": "file",
+      "file_path": "C:/Users/nbaba/Desktop/csv/test_data_10M.csv"
+    }
+  ],
+  "sql_query": "SELECT * FROM test_data_10m",
+  "output_table": "awsom"
+}
