@@ -9,6 +9,8 @@ import duckdb
 import time
 import logging
 import json
+import gc
+import psutil
 from typing import List, Dict, Optional
 from pathlib import Path
 from datetime import datetime
@@ -277,110 +279,361 @@ class CSVAutomationWorker(QThread):
     def cancel(self):
         self.cancel_requested = True
     
-    def process_csv_source_with_progress(self, source_config, output_file, source_name):
-        """Process CSV source (folder or single file) with progress reporting"""
-        
-        if source_config.get('mode') == 'file':
-            # Single file processing
-            file_path = source_config.get('file_path')
-            if not file_path or not os.path.exists(file_path):
-                raise FileNotFoundError(f"CSV file not found: '{file_path}'")
+    def get_file_size_mb(self, file_path):
+        """Get file size in MB"""
+        try:
+            return os.path.getsize(file_path) / (1024 * 1024)
+        except:
+            return 0
+    
+    def check_memory_usage(self):
+        """Check current memory usage and trigger garbage collection if needed"""
+        try:
+            # Get process memory info
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_usage_mb = memory_info.rss / (1024 * 1024)
             
-            self.progress.emit(
-                self.current_progress,
-                f"Processing single file: {os.path.basename(file_path)}"
-            )
+            # Get system memory info
+            virtual_memory = psutil.virtual_memory()
+            available_memory_mb = virtual_memory.available / (1024 * 1024)
             
+            # If memory usage is high or available memory is low, trigger garbage collection
+            if memory_usage_mb > 2000 or available_memory_mb < 500:  # 2GB process or <500MB available
+                gc.collect()
+                
+                # Re-check after garbage collection
+                memory_info = process.memory_info()
+                memory_usage_mb = memory_info.rss / (1024 * 1024)
+                
+                self.progress.emit(
+                    self.current_progress,
+                    f"Memory management: {memory_usage_mb:.0f}MB used, {available_memory_mb:.0f}MB available"
+                )
+            
+            # Return True if we have enough memory to continue
+            return available_memory_mb > 200  # At least 200MB available
+            
+        except Exception:
+            # If we can't check memory, assume it's OK
+            return True
+    
+    def force_cleanup(self):
+        """Force cleanup of temporary variables and garbage collection"""
+        gc.collect()
+        import threading
+        if hasattr(threading, 'active_count'):
+            # Log thread count for debugging
+            logger.debug(f"Active threads: {threading.active_count()}")
+    
+    def cleanup_temp_files(self):
+        """Clean up all temporary files created during processing"""
+        try:
+            import glob
+            # Clean up temp files with various patterns
+            temp_patterns = [
+                "temp_*.csv",
+                "temp_chunk_*.csv"
+            ]
+            
+            for pattern in temp_patterns:
+                for temp_file in glob.glob(pattern):
+                    try:
+                        os.remove(temp_file)
+                        logger.debug(f"Cleaned up temporary file: {temp_file}")
+                    except Exception as e:
+                        logger.warning(f"Could not remove temp file {temp_file}: {e}")
+        except Exception as e:
+            logger.warning(f"Error during temp file cleanup: {e}")
+    
+    def process_large_csv_chunked(self, file_path, output_file, source_file_name, chunk_size=50000):
+        """Process large CSV files in chunks to prevent memory issues"""
+        try:
+            total_rows = 0
+            first_chunk = True
+            
+            # Read in chunks with flexible type handling
             try:
-                # Read the single CSV file
-                self.progress.emit(
-                    self.current_progress + 10,
-                    f"Reading {os.path.basename(file_path)}..."
-                )
-                
-                df = pd.read_csv(file_path, encoding='utf-8')
-                df['_source_file'] = os.path.basename(file_path)
-                
-                self.progress.emit(
-                    self.current_progress + 25,
-                    f"Processing {len(df):,} rows from {source_name}..."
-                )
-                
-                # Save to output file
-                self.progress.emit(
-                    self.current_progress + 28,
-                    f"Saving data for {source_name}..."
-                )
-                
-                df.to_csv(output_file, index=False, encoding='utf-8')
-                
-                return df
-                
+                # First try with normal pandas reading
+                chunk_reader = pd.read_csv(file_path, encoding='utf-8', chunksize=chunk_size)
             except Exception as e:
-                logger.error(f"Error reading {file_path}: {str(e)}")
-                raise ValueError(f"Failed to read CSV file: {str(e)}")
-        
-        else:
-            # Folder processing (original logic)
-            input_folder = source_config.get('folder_path')
-            file_pattern = source_config.get('file_pattern', '*.csv')
+                logger.warning(f"Standard CSV reading failed for {file_path}, trying with dtype=str: {e}")
+                # Fallback to reading all columns as strings
+                chunk_reader = pd.read_csv(file_path, encoding='utf-8', chunksize=chunk_size, dtype=str)
             
-            # Find all CSV files
-            csv_pattern = os.path.join(input_folder, file_pattern)
-            csv_files = glob.glob(csv_pattern)
-            
-            if not csv_files:
-                raise FileNotFoundError(f"No CSV files found in '{input_folder}' matching pattern '{file_pattern}'")
-            
-            self.progress.emit(
-                self.current_progress,
-                f"Found {len(csv_files)} files in {source_name}. Starting merge..."
-            )
-            
-            # Read and collect all DataFrames
-            dataframes = []
-            total_files = len(csv_files)
-            
-            for i, csv_file in enumerate(csv_files):
+            for chunk_num, chunk in enumerate(chunk_reader):
                 if self.cancel_requested:
                     return None
-                    
+                
+                # Add source file column
+                chunk['_source_file'] = source_file_name
+                
+                # Write chunk (append after first chunk)
+                mode = 'w' if first_chunk else 'a'
+                header = first_chunk
+                
                 try:
-                    # Update progress for each file
-                    file_progress = int((i / total_files) * 30)  # 30% of progress for this source
+                    chunk.to_csv(output_file, mode=mode, header=header, index=False, encoding='utf-8')
+                except Exception as e:
+                    logger.warning(f"Error writing chunk {chunk_num} from {file_path}: {e}")
+                    # Try writing with string conversion
+                    chunk_str = chunk.astype(str)
+                    chunk_str.to_csv(output_file, mode=mode, header=header, index=False, encoding='utf-8')
+                
+                total_rows += len(chunk)
+                first_chunk = False
+                
+                # Update progress
+                self.progress.emit(
+                    self.current_progress + 15,
+                    f"Processed {total_rows:,} rows from {source_file_name}..."
+                )
+            
+            return total_rows
+            
+        except Exception as e:
+            logger.error(f"Error processing large file {file_path}: {str(e)}")
+            raise ValueError(f"Failed to process large CSV file: {str(e)}")
+    
+    def process_csv_source_with_progress(self, source_config, output_file, source_name):
+        """Process CSV source (folder or single file) with progress reporting and crash prevention"""
+        
+        # Memory management settings
+        LARGE_FILE_THRESHOLD_MB = 100  # Files larger than 100MB are processed in chunks
+        MAX_MEMORY_USAGE_MB = 1000     # Maximum memory usage before switching to chunked processing
+        CHUNK_SIZE = 50000             # Rows per chunk for large files
+        
+        try:
+            if source_config.get('mode') == 'file':
+                # Single file processing with memory management
+                file_path = source_config.get('file_path')
+                if not file_path or not os.path.exists(file_path):
+                    raise FileNotFoundError(f"CSV file not found: '{file_path}'")
+                
+                file_size_mb = self.get_file_size_mb(file_path)
+                file_name = os.path.basename(file_path)
+                
+                self.progress.emit(
+                    self.current_progress,
+                    f"Processing file: {file_name} ({file_size_mb:.1f} MB)"
+                )
+                
+                # Use chunked processing for large files
+                if file_size_mb > LARGE_FILE_THRESHOLD_MB:
                     self.progress.emit(
-                        self.current_progress + file_progress,
-                        f"Reading file {i+1}/{total_files}: {os.path.basename(csv_file)}"
+                        self.current_progress + 5,
+                        f"Large file detected - using memory-safe processing..."
                     )
                     
-                    df = pd.read_csv(csv_file, encoding='utf-8')
-                    df['_source_file'] = os.path.basename(csv_file)
-                    dataframes.append(df)
+                    total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
                     
-                except Exception as e:
-                    logger.error(f"Error reading {csv_file}: {str(e)}")
-                    continue
+                    self.progress.emit(
+                        self.current_progress + 25,
+                        f"Completed {total_rows:,} rows from {source_name}"
+                    )
+                    
+                    # Return a minimal DataFrame with row count info for results
+                    return pd.DataFrame({'_row_count': [total_rows], '_source_file': [file_name]})
+                
+                else:
+                    # Normal processing for smaller files
+                    self.progress.emit(
+                        self.current_progress + 10,
+                        f"Reading {file_name}..."
+                    )
+                    
+                    try:
+                        # Try reading with automatic type inference
+                        df = pd.read_csv(file_path, encoding='utf-8')
+                        df['_source_file'] = file_name
+                        
+                        self.progress.emit(
+                            self.current_progress + 20,
+                            f"Processing {len(df):,} rows from {source_name}..."
+                        )
+                        
+                        # Save to output file
+                        df.to_csv(output_file, index=False, encoding='utf-8')
+                        
+                        return df
+                        
+                    except (pd.errors.DtypeWarning, pd.errors.ParserError, ValueError) as e:
+                        # Fallback to reading all columns as strings for mixed types
+                        logger.warning(f"Type inference failed for {file_path}, reading as strings: {e}")
+                        try:
+                            df = pd.read_csv(file_path, encoding='utf-8', dtype=str)
+                            df['_source_file'] = file_name
+                            
+                            self.progress.emit(
+                                self.current_progress + 20,
+                                f"Processing {len(df):,} rows from {source_name} (as text)..."
+                            )
+                            
+                            df.to_csv(output_file, index=False, encoding='utf-8')
+                            return df
+                            
+                        except Exception as e2:
+                            logger.warning(f"String reading also failed for {file_path}, switching to chunked: {e2}")
+                            total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
+                            return pd.DataFrame({'_row_count': [total_rows], '_source_file': [file_name]})
+                        
+                    except MemoryError:
+                        # Fallback to chunked processing if we run out of memory
+                        logger.warning(f"Memory error reading {file_path}, switching to chunked processing")
+                        total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
+                        return pd.DataFrame({'_row_count': [total_rows], '_source_file': [file_name]})
             
-            if not dataframes:
-                raise ValueError("No CSV files could be successfully read")
+            else:
+                # Folder processing with memory management
+                input_folder = source_config.get('folder_path')
+                file_pattern = source_config.get('file_pattern', '*.csv')
+                
+                # Find all CSV files
+                csv_pattern = os.path.join(input_folder, file_pattern)
+                csv_files = glob.glob(csv_pattern)
+                
+                if not csv_files:
+                    raise FileNotFoundError(f"No CSV files found in '{input_folder}' matching pattern '{file_pattern}'")
+                
+                # Calculate total size
+                total_size_mb = sum(self.get_file_size_mb(f) for f in csv_files)
+                total_files = len(csv_files)
+                
+                self.progress.emit(
+                    self.current_progress,
+                    f"Found {total_files} files ({total_size_mb:.1f} MB) in {source_name}"
+                )
+                
+                # Use chunked processing if total size is large
+                use_chunked = total_size_mb > MAX_MEMORY_USAGE_MB
+                
+                if use_chunked:
+                    self.progress.emit(
+                        self.current_progress + 2,
+                        f"Large dataset detected - using memory-safe processing..."
+                    )
+                
+                total_rows = 0
+                first_file = True
+                
+                for i, csv_file in enumerate(csv_files):
+                    if self.cancel_requested:
+                        return None
+                    
+                    file_size_mb = self.get_file_size_mb(csv_file)
+                    file_name = os.path.basename(csv_file)
+                    
+                    # Update progress for each file
+                    file_progress = int((i / total_files) * 25)
+                    self.progress.emit(
+                        self.current_progress + file_progress,
+                        f"Processing file {i+1}/{total_files}: {file_name} ({file_size_mb:.1f} MB)"
+                    )
+                    
+                    try:
+                        if use_chunked or file_size_mb > LARGE_FILE_THRESHOLD_MB:
+                            # Process large files in chunks, append to output
+                            import uuid
+                            temp_output = f"temp_chunk_{i}_{uuid.uuid4().hex[:8]}.csv"
+                            
+                            if file_size_mb > LARGE_FILE_THRESHOLD_MB:
+                                rows_processed = self.process_large_csv_chunked(csv_file, temp_output, file_name, CHUNK_SIZE)
+                            else:
+                                # Normal read but write to temp file
+                                df = pd.read_csv(csv_file, encoding='utf-8')
+                                df['_source_file'] = file_name
+                                df.to_csv(temp_output, index=False, encoding='utf-8')
+                                rows_processed = len(df)
+                                del df  # Free memory immediately
+                            
+                            # Append temp file to main output
+                            if first_file:
+                                # First file - copy directly, remove destination if it exists
+                                if os.path.exists(temp_output):
+                                    try:
+                                        # Remove destination file if it exists (Windows fix)
+                                        if os.path.exists(output_file):
+                                            os.remove(output_file)
+                                        os.rename(temp_output, output_file)
+                                    except OSError as e:
+                                        # Fallback: copy content instead of rename
+                                        logger.warning(f"Rename failed, copying file instead: {e}")
+                                        with open(temp_output, 'r', encoding='utf-8') as src:
+                                            with open(output_file, 'w', encoding='utf-8') as dst:
+                                                dst.write(src.read())
+                                        os.remove(temp_output)
+                                first_file = False
+                            else:
+                                # Append to existing file
+                                if os.path.exists(temp_output):
+                                    try:
+                                        with open(temp_output, 'r', encoding='utf-8') as temp_f:
+                                            next(temp_f)  # Skip header
+                                            with open(output_file, 'a', encoding='utf-8') as output_f:
+                                                output_f.writelines(temp_f)
+                                        os.remove(temp_output)
+                                    except Exception as e:
+                                        logger.error(f"Error appending temp file {temp_output}: {e}")
+                                        # Clean up temp file even if append fails
+                                        if os.path.exists(temp_output):
+                                            os.remove(temp_output)
+                            
+                            total_rows += rows_processed
+                            
+                        else:
+                            # Normal processing for small files
+                            try:
+                                df = pd.read_csv(csv_file, encoding='utf-8')
+                                df['_source_file'] = file_name
+                                
+                                # Write to output file
+                                mode = 'w' if first_file else 'a'
+                                header = first_file
+                                df.to_csv(output_file, mode=mode, header=header, index=False, encoding='utf-8')
+                                
+                                total_rows += len(df)
+                                first_file = False
+                                del df  # Free memory immediately
+                                
+                            except (pd.errors.DtypeWarning, pd.errors.ParserError, ValueError) as e:
+                                # Fallback to string reading for problematic files
+                                logger.warning(f"Type issues with {csv_file}, reading as strings: {e}")
+                                df = pd.read_csv(csv_file, encoding='utf-8', dtype=str)
+                                df['_source_file'] = file_name
+                                
+                                mode = 'w' if first_file else 'a'
+                                header = first_file
+                                df.to_csv(output_file, mode=mode, header=header, index=False, encoding='utf-8')
+                                
+                                total_rows += len(df)
+                                first_file = False
+                                del df  # Free memory immediately
+                        
+                    except Exception as e:
+                        logger.error(f"Error reading {csv_file}: {str(e)}")
+                        # Continue with other files instead of failing completely
+                        continue
+                
+                if total_rows == 0:
+                    raise ValueError("No CSV files could be successfully processed")
+                
+                self.progress.emit(
+                    self.current_progress + 28,
+                    f"Completed merging {total_files} files - {total_rows:,} total rows"
+                )
+                
+                # Return minimal DataFrame with summary info  
+                return pd.DataFrame({'_row_count': [total_rows], '_files_processed': [total_files]})
+                
+        except MemoryError as e:
+            error_msg = f"Out of memory processing {source_name}. Try processing smaller batches or increase system memory."
+            logger.error(error_msg)
+            raise MemoryError(error_msg)
             
-            # Merge DataFrames
-            self.progress.emit(
-                self.current_progress + 25,
-                f"Merging {len(dataframes)} files for {source_name}..."
-            )
-            
-            merged_df = pd.concat(dataframes, ignore_index=True, sort=False)
-            
-            # Save to output file
-            self.progress.emit(
-                self.current_progress + 28,
-                f"Saving merged data for {source_name}..."
-            )
-            
-            merged_df.to_csv(output_file, index=False, encoding='utf-8')
-            
-            return merged_df
+        except Exception as e:
+            error_msg = f"Error processing {source_name}: {str(e)}"
+            logger.error(error_msg)
+            raise ValueError(error_msg)
     
     def run(self):
         try:
@@ -403,6 +656,11 @@ class CSVAutomationWorker(QThread):
                 if self.cancel_requested:
                     return
                 
+                # Check memory before processing each source
+                if not self.check_memory_usage():
+                    self.error.emit("Insufficient memory to continue processing. Please close other applications or restart the program.")
+                    return
+                
                 self.current_progress = int(i * source_progress_step)
                 
                 self.progress.emit(
@@ -412,6 +670,22 @@ class CSVAutomationWorker(QThread):
                 
                 # Merge CSV files from this source
                 temp_output = f"temp_{source_config['table_name']}.csv"
+                
+                # Clean up any existing temp files from previous runs
+                if os.path.exists(temp_output):
+                    try:
+                        os.remove(temp_output)
+                    except Exception as e:
+                        logger.warning(f"Could not remove existing temp file {temp_output}: {e}")
+                
+                # Clean up any chunk files that might be left over
+                import glob
+                chunk_pattern = f"temp_chunk_*_{source_config['table_name']}*.csv"
+                for old_chunk in glob.glob(chunk_pattern):
+                    try:
+                        os.remove(old_chunk)
+                    except:
+                        pass
                 
                 try:
                     # Use our progress-enabled CSV processor (handles both folder and single file)
@@ -432,6 +706,22 @@ class CSVAutomationWorker(QThread):
                     
                     # Load into DuckDB
                     table_name = source_config['table_name']
+                    
+                    # Check if table exists first for progress reporting
+                    table_exists = False
+                    try:
+                        result = self.connection.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
+                        table_exists = result is not None
+                    except:
+                        table_exists = False
+                    
+                    if table_exists:
+                        self.progress.emit(
+                            self.current_progress + 25,
+                            f"Replacing existing table '{table_name}'..."
+                        )
+                    
+                    # Always drop the table if it exists to ensure clean replacement
                     self.connection.execute(f"DROP TABLE IF EXISTS {table_name}")
                     
                     # Use absolute path for temp file to avoid path issues
@@ -443,22 +733,118 @@ class CSVAutomationWorker(QThread):
                     
                     # Load with proper path escaping
                     escaped_path = temp_output_abs.replace('\\', '\\\\').replace("'", "''")
-                    self.connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM read_csv_auto('{escaped_path}')")
+                    
+                    # Execute with timeout protection
+                    import signal
+                    
+                    def timeout_handler(signum, frame):
+                        raise TimeoutError("Database operation timed out")
+                    
+                    try:
+                        # Set timeout for large file loads (5 minutes)
+                        if hasattr(signal, 'SIGALRM'):  # Unix systems
+                            signal.signal(signal.SIGALRM, timeout_handler)
+                            signal.alarm(300)  # 5 minutes
+                        
+                        # Try multiple approaches for robust CSV loading
+                        try:
+                            # First attempt: Use read_csv_auto with flexible settings
+                            self.progress.emit(
+                                self.current_progress + 32,
+                                f"Loading {table_name} with auto-detection..."
+                            )
+                            self.connection.execute(f"""
+                                CREATE TABLE {table_name} AS 
+                                SELECT * FROM read_csv_auto('{escaped_path}', 
+                                    sample_size=-1,
+                                    ignore_errors=true,
+                                    null_padding=true
+                                )
+                            """)
+                        except Exception as e1:
+                            logger.warning(f"Auto-detection failed for {table_name}, trying with all VARCHAR: {e1}")
+                            try:
+                                # Second attempt: Force all columns as VARCHAR to avoid type issues
+                                self.progress.emit(
+                                    self.current_progress + 32,
+                                    f"Loading {table_name} as text (type detection failed)..."
+                                )
+                                self.connection.execute(f"""
+                                    CREATE TABLE {table_name} AS 
+                                    SELECT * FROM read_csv_auto('{escaped_path}', 
+                                        all_varchar=true,
+                                        ignore_errors=true,
+                                        null_padding=true
+                                    )
+                                """)
+                            except Exception as e2:
+                                logger.warning(f"All VARCHAR failed for {table_name}, trying manual approach: {e2}")
+                                # Third attempt: Use basic CSV reading
+                                self.progress.emit(
+                                    self.current_progress + 32,
+                                    f"Loading {table_name} with basic CSV reader..."
+                                )
+                                self.connection.execute(f"""
+                                    CREATE TABLE {table_name} AS 
+                                    SELECT * FROM read_csv('{escaped_path}', 
+                                        auto_detect=true,
+                                        ignore_errors=true,
+                                        header=true
+                                    )
+                                """)
+                        
+                        if hasattr(signal, 'SIGALRM'):
+                            signal.alarm(0)  # Cancel timeout
+                            
+                    except TimeoutError:
+                        if hasattr(signal, 'SIGALRM'):
+                            signal.alarm(0)  # Cancel timeout
+                        raise TimeoutError(f"Database loading timeout for {table_name}. File may be too large.")
                     
                     # Clean up temp file
                     if os.path.exists(temp_output_abs):
                         os.remove(temp_output_abs)
                     
                     results['sources_processed'] += 1
-                    results['total_rows'] += len(df)
+                    
+                    # Handle both normal DataFrames and chunked processing results
+                    if '_row_count' in df.columns:
+                        # Chunked processing result
+                        row_count = df['_row_count'].iloc[0] if len(df) > 0 else 0
+                        results['total_rows'] += row_count
+                    else:
+                        # Normal DataFrame
+                        results['total_rows'] += len(df)
+                    
                     results['tables_created'].append(table_name)
                     
                     # Complete progress for this source
+                    row_count_display = df['_row_count'].iloc[0] if '_row_count' in df.columns else len(df)
                     self.progress.emit(
                         int((i + 1) * source_progress_step),
-                        f"Completed {source_config['table_name']} - {len(df):,} rows loaded"
+                        f"Completed {source_config['table_name']} - {row_count_display:,} rows loaded"
                     )
                     
+                    # Clean up memory after each source
+                    del df
+                    self.force_cleanup()
+                    
+                except MemoryError as e:
+                    logger.error(f"Memory error processing source {source_config['table_name']}: {e}")
+                    self.error.emit(f"Out of memory processing {source_config['table_name']}. Please try processing smaller files or free up system memory.")
+                    return
+                except FileNotFoundError as e:
+                    logger.error(f"File not found for source {source_config['table_name']}: {e}")
+                    self.error.emit(f"File not found for {source_config['table_name']}: {str(e)}")
+                    return
+                except PermissionError as e:
+                    logger.error(f"Permission error processing source {source_config['table_name']}: {e}")
+                    self.error.emit(f"Permission denied accessing files for {source_config['table_name']}. Please check file permissions.")
+                    return
+                except TimeoutError as e:
+                    logger.error(f"Timeout error processing source {source_config['table_name']}: {e}")
+                    self.error.emit(f"Operation timed out for {source_config['table_name']}. The dataset may be too large for available system resources.")
+                    return
                 except Exception as e:
                     logger.error(f"Error processing source {source_config['table_name']}: {e}")
                     self.error.emit(f"Error processing {source_config['table_name']}: {str(e)}")
@@ -470,6 +856,19 @@ class CSVAutomationWorker(QThread):
                 
                 try:
                     output_table = self.output_config['table_name']
+                    
+                    # Check if output table exists first for progress reporting
+                    output_table_exists = False
+                    try:
+                        result = self.connection.execute(f"SELECT 1 FROM {output_table} LIMIT 1").fetchone()
+                        output_table_exists = result is not None
+                    except:
+                        output_table_exists = False
+                    
+                    if output_table_exists:
+                        self.progress.emit(77, f"Replacing existing output table '{output_table}'...")
+                    
+                    # Always drop the output table if it exists to ensure clean replacement
                     self.connection.execute(f"DROP TABLE IF EXISTS {output_table}")
                     
                     # Create output table from SQL query
@@ -495,10 +894,15 @@ class CSVAutomationWorker(QThread):
             results['execution_time'] = time.time() - start_time
             self.progress.emit(100, "Processing completed successfully!")
             
+            # Clean up all temporary files
+            self.cleanup_temp_files()
+            
             self.finished.emit(True, "CSV automation completed successfully!", results)
             
         except Exception as e:
             logger.error(f"Unexpected error in CSV automation: {e}")
+            # Clean up temporary files even on error
+            self.cleanup_temp_files()
             self.error.emit(f"Unexpected error: {str(e)}")
 
 
