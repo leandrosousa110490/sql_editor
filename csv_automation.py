@@ -11,9 +11,20 @@ import logging
 import json
 import gc
 import psutil
+import re
 from typing import List, Dict, Optional
 from pathlib import Path
 from datetime import datetime
+import openpyxl
+from openpyxl import load_workbook
+
+# Polars import for faster Excel processing
+try:
+    import polars as pl
+    POLARS_AVAILABLE = True
+except ImportError:
+    POLARS_AVAILABLE = False
+    print("Polars not installed. Using pandas fallback for Excel processing.")
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog,
@@ -35,6 +46,118 @@ except ImportError:
     SQL_EDITOR_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+
+def clean_column_name(name: str) -> str:
+    """Clean column name for SQL compatibility"""
+    name = str(name).strip()
+    name = re.sub(r'[^\w\s]', '_', name)  # Replace special chars with underscore
+    name = re.sub(r'\s+', '_', name)      # Replace spaces with underscore
+    name = re.sub(r'_+', '_', name)       # Replace multiple underscores with single
+    name = name.strip('_')                # Remove leading/trailing underscores
+    
+    # Ensure it doesn't start with a number
+    if name and name[0].isdigit():
+        name = f"col_{name}"
+    
+    return name or "unnamed_column"
+
+
+def read_excel_optimized(file_path: str, sheet_name: Optional[str] = None) -> pd.DataFrame:
+    """Read Excel file using Polars for maximum speed, fallback to pandas"""
+    try:
+        if POLARS_AVAILABLE:
+            # Try Polars first for maximum speed
+            try:
+                if sheet_name:
+                    df_pl = pl.read_excel(file_path, sheet_name=sheet_name)
+                else:
+                    df_pl = pl.read_excel(file_path)
+                df = df_pl.to_pandas()
+                
+                # Clean column names
+                df.columns = [clean_column_name(col) for col in df.columns]
+                return df
+            except Exception as e:
+                logger.warning(f"Polars failed for {file_path} (sheet: {sheet_name}), using pandas fallback: {e}")
+                # Fallback to pandas
+                pass
+        
+        # Use pandas (either as fallback or if Polars not available)
+        try:
+            if file_path.lower().endswith('.xls'):
+                engine = 'xlrd'  # Faster for old Excel files
+            else:
+                engine = 'openpyxl'  # Faster for new Excel files
+        except:
+            engine = 'openpyxl'
+        
+        if sheet_name:
+            df = pd.read_excel(file_path, sheet_name=sheet_name, engine=engine)
+        else:
+            df = pd.read_excel(file_path, engine=engine)
+        
+        # Clean column names
+        df.columns = [clean_column_name(col) for col in df.columns]
+        return df
+        
+    except Exception as e:
+        logger.error(f"Failed to read Excel file {file_path}: {e}")
+        raise
+
+
+def read_excel_all_sheets_optimized(file_path: str) -> Dict[str, pd.DataFrame]:
+    """Read all sheets from Excel file using Polars optimization"""
+    try:
+        if POLARS_AVAILABLE:
+            try:
+                # Polars doesn't have direct all-sheets reading, so we'll get sheet names first
+                # Use pandas to get sheet names, then read each with Polars
+                excel_file = pd.ExcelFile(file_path)
+                sheet_names = excel_file.sheet_names
+                
+                all_sheets = {}
+                for sheet_name in sheet_names:
+                    try:
+                        df_pl = pl.read_excel(file_path, sheet_name=sheet_name)
+                        df = df_pl.to_pandas()
+                        df.columns = [clean_column_name(col) for col in df.columns]
+                        all_sheets[sheet_name] = df
+                    except Exception as e:
+                        logger.warning(f"Polars failed for sheet {sheet_name}, using pandas: {e}")
+                        # Fallback to pandas for this sheet
+                        try:
+                            engine = 'openpyxl' if not file_path.lower().endswith('.xls') else 'xlrd'
+                        except:
+                            engine = 'openpyxl'
+                        df = pd.read_excel(file_path, sheet_name=sheet_name, engine=engine)
+                        df.columns = [clean_column_name(col) for col in df.columns]
+                        all_sheets[sheet_name] = df
+                
+                return all_sheets
+                
+            except Exception as e:
+                logger.warning(f"Polars batch reading failed for {file_path}, using pandas: {e}")
+                # Fallback to pandas batch reading
+                pass
+        
+        # Pandas fallback
+        try:
+            engine = 'openpyxl' if not file_path.lower().endswith('.xls') else 'xlrd'
+        except:
+            engine = 'openpyxl'
+            
+        all_sheets = pd.read_excel(file_path, sheet_name=None, engine=engine)
+        
+        # Clean column names for all sheets
+        for sheet_name, df in all_sheets.items():
+            df.columns = [clean_column_name(col) for col in df.columns]
+        
+        return all_sheets
+        
+    except Exception as e:
+        logger.error(f"Failed to read Excel file {file_path}: {e}")
+        raise
 
 
 class CSVSourceWidget(QWidget):
@@ -62,7 +185,12 @@ class CSVSourceWidget(QWidget):
         
         # Mode toggle
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["Folder (Multiple Files)", "Single File"])
+        self.mode_combo.addItems([
+            "CSV Folder (Multiple Files)", 
+            "CSV Single File",
+            "Excel Folder (Multiple Files)",
+            "Excel Single File"
+        ])
         self.mode_combo.currentTextChanged.connect(self.on_mode_changed)
         header_layout.addWidget(self.mode_combo)
         
@@ -101,6 +229,19 @@ class CSVSourceWidget(QWidget):
         self.pattern_label = QLabel("File Pattern:")
         self.form_layout.addRow(self.pattern_label, self.pattern_line)
         
+        # Excel sheet selection (only for Excel modes)
+        self.sheet_combo = QComboBox()
+        self.sheet_combo.addItems(["All sheets (combined)", "First sheet only", "Specific sheet..."])
+        self.sheet_combo.currentTextChanged.connect(self.on_sheet_selection_changed)
+        self.sheet_label = QLabel("Sheet Selection:")
+        self.form_layout.addRow(self.sheet_label, self.sheet_combo)
+        
+        # Specific sheet name input
+        self.sheet_name_line = QLineEdit()
+        self.sheet_name_line.setPlaceholderText("Enter sheet name...")
+        self.sheet_name_label = QLabel("Sheet Name:")
+        self.form_layout.addRow(self.sheet_name_label, self.sheet_name_line)
+        
         layout.addLayout(self.form_layout)
         
         # File preview
@@ -115,33 +256,83 @@ class CSVSourceWidget(QWidget):
         layout.addWidget(self.preview_label)
         
         # Set initial mode
-        self.current_mode = "folder"
+        self.current_mode = "csv_folder"
+        self.file_type = "csv"
         self.update_ui_for_mode()
     
+    def on_sheet_selection_changed(self):
+        """Handle sheet selection changes"""
+        selection = self.sheet_combo.currentText()
+        is_specific = "Specific sheet" in selection
+        self.sheet_name_line.setVisible(is_specific)
+        self.sheet_name_label.setVisible(is_specific)
+    
     def on_mode_changed(self):
-        """Handle mode change between folder and single file"""
+        """Handle mode change between different file types and modes"""
         current_text = self.mode_combo.currentText()
-        if "Single File" in current_text:
-            self.current_mode = "file"
-        else:
-            self.current_mode = "folder"
+        
+        if "Excel Single File" in current_text:
+            self.current_mode = "excel_file"
+            self.file_type = "excel"
+        elif "Excel Folder" in current_text:
+            self.current_mode = "excel_folder" 
+            self.file_type = "excel"
+        elif "CSV Single File" in current_text:
+            self.current_mode = "csv_file"
+            self.file_type = "csv"
+        else:  # CSV Folder (default)
+            self.current_mode = "csv_folder"
+            self.file_type = "csv"
+            
         self.update_ui_for_mode()
         
     def update_ui_for_mode(self):
         """Update UI elements based on current mode"""
-        if self.current_mode == "file":
-            # Single file mode
+        if self.current_mode == "csv_file":
+            # CSV Single file mode
             self.path_label.setText("CSV File:")
             self.path_line.setPlaceholderText("Select CSV file...")
             self.pattern_line.setVisible(False)
             self.pattern_label.setVisible(False)
+            self.sheet_combo.setVisible(False)
+            self.sheet_label.setVisible(False)
+            self.sheet_name_line.setVisible(False)
+            self.sheet_name_label.setVisible(False)
             self.preview_title.setText("File Preview:")
+        elif self.current_mode == "excel_file":
+            # Excel Single file mode
+            self.path_label.setText("Excel File:")
+            self.path_line.setPlaceholderText("Select Excel file...")
+            self.pattern_line.setVisible(False)
+            self.pattern_label.setVisible(False)
+            self.sheet_combo.setVisible(True)
+            self.sheet_label.setVisible(True)
+            self.on_sheet_selection_changed()  # Update sheet name visibility
+            self.preview_title.setText("File Preview:")
+        elif self.current_mode == "excel_folder":
+            # Excel Folder mode
+            self.path_label.setText("Excel Folder:")
+            self.path_line.setPlaceholderText("Select Excel folder...")
+            self.pattern_line.setVisible(True)
+            self.pattern_label.setVisible(True)
+            self.pattern_line.setText("*.xlsx")
+            self.pattern_label.setText("File Pattern:")
+            self.sheet_combo.setVisible(True)
+            self.sheet_label.setVisible(True)
+            self.on_sheet_selection_changed()  # Update sheet name visibility
+            self.preview_title.setText("Files Preview:")
         else:
-            # Folder mode
+            # CSV Folder mode (default)
             self.path_label.setText("CSV Folder:")
             self.path_line.setPlaceholderText("Select CSV folder...")
             self.pattern_line.setVisible(True)
             self.pattern_label.setVisible(True)
+            self.pattern_line.setText("*.csv")
+            self.pattern_label.setText("File Pattern:")
+            self.sheet_combo.setVisible(False)
+            self.sheet_label.setVisible(False)
+            self.sheet_name_line.setVisible(False)
+            self.sheet_name_label.setVisible(False)
             self.preview_title.setText("Files Preview:")
         
         # Update preview without clearing if we're loading configuration
@@ -149,7 +340,7 @@ class CSVSourceWidget(QWidget):
     
     def browse_path(self):
         """Browse for folder or file depending on mode"""
-        if self.current_mode == "file":
+        if self.current_mode == "csv_file":
             file_path, _ = QFileDialog.getOpenFileName(
                 self, 
                 "Select CSV File", 
@@ -158,8 +349,21 @@ class CSVSourceWidget(QWidget):
             )
             if file_path:
                 self.path_line.setText(file_path)
+        elif self.current_mode == "excel_file":
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, 
+                "Select Excel File", 
+                "", 
+                "Excel Files (*.xlsx *.xls);;All Files (*)"
+            )
+            if file_path:
+                self.path_line.setText(file_path)
         else:
-            folder = QFileDialog.getExistingDirectory(self, "Select CSV Folder")
+            # Folder modes
+            if self.file_type == "excel":
+                folder = QFileDialog.getExistingDirectory(self, "Select Excel Folder")
+            else:
+                folder = QFileDialog.getExistingDirectory(self, "Select CSV Folder")
             if folder:
                 self.path_line.setText(folder)
     
@@ -170,7 +374,7 @@ class CSVSourceWidget(QWidget):
             self.update_preview()
             # Auto-suggest table name
             if not self.table_line.text():
-                if self.current_mode == "file":
+                if self.current_mode in ["csv_file", "excel_file"]:
                     # Use filename without extension
                     suggested_name = os.path.splitext(os.path.basename(path))[0]
                 else:
@@ -187,13 +391,14 @@ class CSVSourceWidget(QWidget):
             self.preview_label.setText("Invalid path")
             return
         
-        if self.current_mode == "file":
+        if self.current_mode in ["csv_file", "excel_file"]:
             # Single file mode
-            if path.lower().endswith('.csv'):
-                filename = os.path.basename(path)
+            filename = os.path.basename(path)
+            
+            if self.current_mode == "csv_file" and path.lower().endswith('.csv'):
                 self.file_list.addItem(filename)
                 
-                # Try to get file info
+                # Try to get CSV file info
                 try:
                     file_size = os.path.getsize(path)
                     size_mb = file_size / (1024 * 1024)
@@ -202,27 +407,63 @@ class CSVSourceWidget(QWidget):
                     df_sample = pd.read_csv(path, nrows=0)  # Just headers
                     col_count = len(df_sample.columns)
                     
-                    self.preview_label.setText(f"File: {filename} ({size_mb:.1f} MB, {col_count} columns)")
+                    self.preview_label.setText(f"CSV: {filename} ({size_mb:.1f} MB, {col_count} columns)")
                 except Exception as e:
-                    self.preview_label.setText(f"File: {filename} (Unable to read: {str(e)})")
+                    self.preview_label.setText(f"CSV: {filename} (Unable to read: {str(e)})")
+                    
+            elif self.current_mode == "excel_file" and path.lower().endswith(('.xlsx', '.xls')):
+                self.file_list.addItem(filename)
+                
+                # Try to get Excel file info
+                try:
+                    file_size = os.path.getsize(path)
+                    size_mb = file_size / (1024 * 1024)
+                    
+                    # Get worksheet info
+                    workbook = load_workbook(path, read_only=True)
+                    sheet_names = workbook.sheetnames
+                    workbook.close()
+                    
+                    # Get column info from first sheet
+                    df_sample = pd.read_excel(path, nrows=0, sheet_name=sheet_names[0])
+                    col_count = len(df_sample.columns)
+                    
+                    sheet_info = f"{len(sheet_names)} sheet(s)" if len(sheet_names) > 1 else f"Sheet: {sheet_names[0]}"
+                    self.preview_label.setText(f"Excel: {filename} ({size_mb:.1f} MB, {col_count} columns, {sheet_info})")
+                except Exception as e:
+                    self.preview_label.setText(f"Excel: {filename} (Unable to read: {str(e)})")
             else:
-                self.preview_label.setText("Selected file is not a CSV file")
+                file_type = "Excel" if self.current_mode == "excel_file" else "CSV"
+                self.preview_label.setText(f"Selected file is not a {file_type} file")
         else:
             # Folder mode
-            pattern = self.pattern_line.text() or "*.csv"
-            csv_files = glob.glob(os.path.join(path, pattern))
+            if self.file_type == "excel":
+                pattern = self.pattern_line.text() or "*.xlsx"
+                default_pattern = "*.xlsx"
+            else:
+                pattern = self.pattern_line.text() or "*.csv"
+                default_pattern = "*.csv"
+                
+            files = glob.glob(os.path.join(path, pattern))
             
-            if csv_files:
-                for file_path in sorted(csv_files)[:5]:  # Show max 5 files
+            # Also include .xls files for Excel mode
+            if self.file_type == "excel" and pattern == "*.xlsx":
+                xls_files = glob.glob(os.path.join(path, "*.xls"))
+                files.extend(xls_files)
+            
+            if files:
+                for file_path in sorted(files)[:5]:  # Show max 5 files
                     filename = os.path.basename(file_path)
                     self.file_list.addItem(filename)
                 
-                if len(csv_files) > 5:
-                    self.file_list.addItem(f"... and {len(csv_files) - 5} more files")
+                if len(files) > 5:
+                    self.file_list.addItem(f"... and {len(files) - 5} more files")
                 
-                self.preview_label.setText(f"Found {len(csv_files)} CSV files")
+                file_type_name = "Excel" if self.file_type == "excel" else "CSV"
+                self.preview_label.setText(f"Found {len(files)} {file_type_name} files")
             else:
-                self.preview_label.setText("No CSV files found")
+                file_type_name = "Excel" if self.file_type == "excel" else "CSV"
+                self.preview_label.setText(f"No {file_type_name} files found")
     
     def clean_table_name(self, name):
         import re
@@ -238,22 +479,80 @@ class CSVSourceWidget(QWidget):
     def get_config(self):
         config = {
             'table_name': self.table_line.text(),
-            'mode': self.current_mode
+            'mode': self.current_mode,
+            'file_type': getattr(self, 'file_type', 'csv')
         }
         
-        if self.current_mode == "file":
+        if self.current_mode in ["csv_file", "excel_file"]:
             config['file_path'] = self.path_line.text()
         else:
             config['folder_path'] = self.path_line.text()
-            config['file_pattern'] = self.pattern_line.text() or "*.csv"
+            if self.file_type == "excel":
+                config['file_pattern'] = self.pattern_line.text() or "*.xlsx"
+            else:
+                config['file_pattern'] = self.pattern_line.text() or "*.csv"
+        
+        # Add Excel sheet selection configuration
+        if self.file_type == "excel":
+            config['sheet_selection'] = self.sheet_combo.currentText()
+            config['sheet_name'] = self.sheet_name_line.text()
         
         return config
+    
+    def set_config(self, config):
+        """Load configuration into this source widget"""
+        try:
+            # Set table name
+            self.table_line.setText(config.get('table_name', ''))
+            
+            # Handle mode-specific configuration
+            mode = config.get('mode', 'csv_folder')
+            file_type = config.get('file_type', 'csv')
+            
+            # Set up mode combo based on saved configuration
+            if mode == 'csv_file':
+                self.mode_combo.setCurrentText("CSV Single File")
+            elif mode == 'excel_file':
+                self.mode_combo.setCurrentText("Excel Single File")
+            elif mode == 'excel_folder':
+                self.mode_combo.setCurrentText("Excel Folder (Multiple Files)")
+            else:  # csv_folder or legacy 'folder'
+                self.mode_combo.setCurrentText("CSV Folder (Multiple Files)")
+            
+            # Update internal state
+            self.current_mode = mode
+            self.file_type = file_type
+            self.update_ui_for_mode()
+            
+            # Set paths
+            if mode in ['csv_file', 'excel_file']:
+                self.path_line.setText(config.get('file_path', ''))
+            else:
+                self.path_line.setText(config.get('folder_path', ''))
+                pattern = config.get('file_pattern', '*.xlsx' if file_type == 'excel' else '*.csv')
+                self.pattern_line.setText(pattern)
+            
+            # Set Excel sheet selection if applicable
+            if file_type == 'excel':
+                sheet_selection = config.get('sheet_selection', 'All sheets (combined)')
+                self.sheet_combo.setCurrentText(sheet_selection)
+                
+                sheet_name = config.get('sheet_name', '')
+                self.sheet_name_line.setText(sheet_name)
+                
+                self.on_sheet_selection_changed()  # Update visibility
+            
+            # Trigger updates
+            self.on_path_changed()
+            
+        except Exception as e:
+            logger.error(f"Error setting source configuration: {e}")
     
     def is_valid(self):
         config = self.get_config()
         path_exists = False
         
-        if self.current_mode == "file":
+        if self.current_mode in ["csv_file", "excel_file"]:
             path_exists = config.get('file_path') and os.path.exists(config['file_path'])
         else:
             path_exists = config.get('folder_path') and os.path.exists(config['folder_path'])
@@ -346,6 +645,198 @@ class CSVAutomationWorker(QThread):
         except Exception as e:
             logger.warning(f"Error during temp file cleanup: {e}")
     
+    def normalize_column_names(self, dataframes_list):
+        """Normalize column names across multiple dataframes"""
+        if not dataframes_list:
+            return []
+        
+        # Collect all unique column names from all dataframes
+        all_columns = set()
+        for df in dataframes_list:
+            all_columns.update(df.columns)
+        
+        # Sort columns for consistent ordering
+        normalized_columns = sorted(all_columns)
+        
+        # Reindex all dataframes to have the same columns
+        normalized_dfs = []
+        for df in dataframes_list:
+            df_normalized = df.reindex(columns=normalized_columns, fill_value=None)
+            normalized_dfs.append(df_normalized)
+        
+        return normalized_dfs
+    
+    def read_excel_file(self, file_path, source_file_name, sheet_selection="All sheets (combined)", sheet_name=""):
+        """Read an Excel file and return a DataFrame - Optimized with Polars for speed"""
+        try:
+            # Get sheet names first (using pandas for sheet discovery)
+            excel_file = pd.ExcelFile(file_path)
+            sheet_names = excel_file.sheet_names
+            
+            dataframes = []
+            
+            if sheet_selection == "First sheet only":
+                # Read only the first sheet using Polars optimization
+                if sheet_names:
+                    try:
+                        df = read_excel_optimized(file_path, sheet_names[0])
+                        df['_source_file'] = source_file_name
+                        df['_source_sheet'] = sheet_names[0]
+                        dataframes.append(df)
+                    except Exception as e:
+                        logger.warning(f"Could not read first sheet '{sheet_names[0]}' from {file_path}: {e}")
+                        
+            elif "Specific sheet" in sheet_selection and sheet_name:
+                # Read specific sheet by name using Polars optimization
+                if sheet_name in sheet_names:
+                    try:
+                        df = read_excel_optimized(file_path, sheet_name)
+                        df['_source_file'] = source_file_name
+                        df['_source_sheet'] = sheet_name
+                        dataframes.append(df)
+                    except Exception as e:
+                        logger.warning(f"Could not read sheet '{sheet_name}' from {file_path}: {e}")
+                else:
+                    logger.warning(f"Sheet '{sheet_name}' not found in {file_path}. Available sheets: {sheet_names}")
+                    # Fall back to first sheet
+                    if sheet_names:
+                        try:
+                            df = read_excel_optimized(file_path, sheet_names[0])
+                            df['_source_file'] = source_file_name
+                            df['_source_sheet'] = sheet_names[0]
+                            dataframes.append(df)
+                        except Exception as e:
+                            logger.warning(f"Could not read fallback sheet '{sheet_names[0]}' from {file_path}: {e}")
+            else:
+                # Read all sheets and combine them (default behavior)
+                # Use Polars-optimized batch reading
+                try:
+                    all_sheets = read_excel_all_sheets_optimized(file_path)
+                    
+                    for sheet_name, df in all_sheets.items():
+                        try:
+                            # Add sheet info to track source
+                            df['_source_file'] = source_file_name
+                            df['_source_sheet'] = sheet_name
+                            dataframes.append(df)
+                        except Exception as e:
+                            logger.warning(f"Could not process sheet '{sheet_name}' from {file_path}: {e}")
+                            continue
+                            
+                except Exception as e:
+                    # Fallback to individual sheet reading with Polars optimization
+                    logger.warning(f"Batch reading failed, falling back to individual sheets: {e}")
+                    for sheet_name in sheet_names:
+                        try:
+                            df = read_excel_optimized(file_path, sheet_name)
+                            
+                            # Add sheet info to track source
+                            df['_source_file'] = source_file_name
+                            df['_source_sheet'] = sheet_name
+                            
+                            dataframes.append(df)
+                            
+                        except Exception as e2:
+                            logger.warning(f"Could not read sheet '{sheet_name}' from {file_path}: {e2}")
+                            continue
+            
+            if not dataframes:
+                raise ValueError(f"No readable sheets found in {file_path}")
+            
+            # If only one sheet or single sheet selection, no need to normalize columns
+            if len(dataframes) == 1:
+                return dataframes[0]
+            
+            # Optimize column normalization for multiple sheets
+            if len(dataframes) > 1:
+                # Get unique columns more efficiently
+                all_columns = set()
+                for df in dataframes:
+                    all_columns.update(df.columns)
+                
+                # Only normalize if columns are different
+                first_columns = set(dataframes[0].columns)
+                needs_normalization = any(set(df.columns) != first_columns for df in dataframes[1:])
+                
+                if needs_normalization:
+                    normalized_dfs = self.normalize_column_names(dataframes)
+                    combined_df = pd.concat(normalized_dfs, ignore_index=True, sort=False)
+                else:
+                    # Faster concatenation when columns are already aligned
+                    combined_df = pd.concat(dataframes, ignore_index=True)
+                
+                return combined_df
+            
+        except Exception as e:
+            logger.error(f"Error reading Excel file {file_path}: {e}")
+            raise ValueError(f"Failed to read Excel file: {str(e)}")
+    
+    def process_large_excel_chunked(self, file_path, output_file, source_file_name, chunk_size=10000, sheet_selection="All sheets (combined)", sheet_name=""):
+        """Process large Excel files in chunks using Polars optimization"""
+        try:
+            total_rows = 0
+            first_chunk = True
+            
+            # Get sheet names for processing (using pandas for discovery)
+            excel_file = pd.ExcelFile(file_path)
+            
+            # Determine which sheets to process based on selection
+            sheets_to_process = []
+            if sheet_selection == "First sheet only":
+                if excel_file.sheet_names:
+                    sheets_to_process = [excel_file.sheet_names[0]]
+            elif "Specific sheet" in sheet_selection and sheet_name:
+                if sheet_name in excel_file.sheet_names:
+                    sheets_to_process = [sheet_name]
+                else:
+                    logger.warning(f"Sheet '{sheet_name}' not found. Using first sheet as fallback.")
+                    if excel_file.sheet_names:
+                        sheets_to_process = [excel_file.sheet_names[0]]
+            else:
+                # All sheets (default)
+                sheets_to_process = excel_file.sheet_names
+            
+            for sheet_name in sheets_to_process:
+                if self.cancel_requested:
+                    return None
+                
+                try:
+                    # Read sheet using Polars optimization for maximum speed
+                    df = read_excel_optimized(file_path, sheet_name)
+                    df['_source_file'] = source_file_name
+                    df['_source_sheet'] = sheet_name
+                    
+                    # Process in chunks if the sheet is large
+                    for i in range(0, len(df), chunk_size):
+                        chunk = df.iloc[i:i+chunk_size].copy()
+                        
+                        # Write chunk
+                        mode = 'w' if first_chunk else 'a'
+                        header = first_chunk
+                        chunk.to_csv(output_file, mode=mode, header=header, index=False, encoding='utf-8')
+                        
+                        total_rows += len(chunk)
+                        first_chunk = False
+                        
+                        # Update progress
+                        self.progress.emit(
+                            self.current_progress + 15,
+                            f"Processed {total_rows:,} rows from {source_file_name} (sheet: {sheet_name})..."
+                        )
+                        
+                        if self.cancel_requested:
+                            return None
+                    
+                except Exception as e:
+                    logger.warning(f"Error processing sheet '{sheet_name}' in {file_path}: {e}")
+                    continue
+            
+            return total_rows
+            
+        except Exception as e:
+            logger.error(f"Error processing large Excel file {file_path}: {e}")
+            raise ValueError(f"Failed to process large Excel file: {str(e)}")
+    
     def process_large_csv_chunked(self, file_path, output_file, source_file_name, chunk_size=50000):
         """Process large CSV files in chunks to prevent memory issues"""
         try:
@@ -404,7 +895,10 @@ class CSVAutomationWorker(QThread):
         CHUNK_SIZE = 50000             # Rows per chunk for large files
         
         try:
-            if source_config.get('mode') == 'file':
+            file_type = source_config.get('file_type', 'csv')
+            mode = source_config.get('mode', 'csv_folder')
+            
+            if mode in ['csv_file', 'excel_file']:
                 # Single file processing with memory management
                 file_path = source_config.get('file_path')
                 if not file_path or not os.path.exists(file_path):
@@ -425,7 +919,10 @@ class CSVAutomationWorker(QThread):
                         f"Large file detected - using memory-safe processing..."
                     )
                     
-                    total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
+                    if file_type == 'excel':
+                        total_rows = self.process_large_excel_chunked(file_path, output_file, file_name, CHUNK_SIZE)
+                    else:
+                        total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
                     
                     self.progress.emit(
                         self.current_progress + 25,
@@ -443,9 +940,16 @@ class CSVAutomationWorker(QThread):
                     )
                     
                     try:
-                        # Try reading with automatic type inference
-                        df = pd.read_csv(file_path, encoding='utf-8')
-                        df['_source_file'] = file_name
+                        # Handle different file types
+                        if file_type == 'excel':
+                            # Excel file processing
+                            sheet_selection = source_config.get('sheet_selection', 'All sheets (combined)')
+                            sheet_name = source_config.get('sheet_name', '')
+                            df = self.read_excel_file(file_path, file_name, sheet_selection, sheet_name)
+                        else:
+                            # CSV file processing
+                            df = pd.read_csv(file_path, encoding='utf-8')
+                            df['_source_file'] = file_name
                         
                         self.progress.emit(
                             self.current_progress + 20,
@@ -458,46 +962,65 @@ class CSVAutomationWorker(QThread):
                         return df
                         
                     except (pd.errors.DtypeWarning, pd.errors.ParserError, ValueError) as e:
-                        # Fallback to reading all columns as strings for mixed types
-                        logger.warning(f"Type inference failed for {file_path}, reading as strings: {e}")
-                        try:
-                            df = pd.read_csv(file_path, encoding='utf-8', dtype=str)
-                            df['_source_file'] = file_name
-                            
-                            self.progress.emit(
-                                self.current_progress + 20,
-                                f"Processing {len(df):,} rows from {source_name} (as text)..."
-                            )
-                            
-                            df.to_csv(output_file, index=False, encoding='utf-8')
-                            return df
-                            
-                        except Exception as e2:
-                            logger.warning(f"String reading also failed for {file_path}, switching to chunked: {e2}")
-                            total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
+                        # Fallback for CSV files with type issues
+                        if file_type == 'csv':
+                            logger.warning(f"Type inference failed for {file_path}, reading as strings: {e}")
+                            try:
+                                df = pd.read_csv(file_path, encoding='utf-8', dtype=str)
+                                df['_source_file'] = file_name
+                                
+                                self.progress.emit(
+                                    self.current_progress + 20,
+                                    f"Processing {len(df):,} rows from {source_name} (as text)..."
+                                )
+                                
+                                df.to_csv(output_file, index=False, encoding='utf-8')
+                                return df
+                                
+                            except Exception as e2:
+                                logger.warning(f"String reading also failed for {file_path}, switching to chunked: {e2}")
+                                total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
+                                return pd.DataFrame({'_row_count': [total_rows], '_source_file': [file_name]})
+                        else:
+                            # For Excel files, switch to chunked processing
+                            logger.warning(f"Excel processing failed for {file_path}, switching to chunked: {e}")
+                            sheet_selection = source_config.get('sheet_selection', 'All sheets (combined)')
+                            sheet_name = source_config.get('sheet_name', '')
+                            total_rows = self.process_large_excel_chunked(file_path, output_file, file_name, CHUNK_SIZE, sheet_selection, sheet_name)
                             return pd.DataFrame({'_row_count': [total_rows], '_source_file': [file_name]})
                         
                     except MemoryError:
                         # Fallback to chunked processing if we run out of memory
                         logger.warning(f"Memory error reading {file_path}, switching to chunked processing")
-                        total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
+                        if file_type == 'excel':
+                            sheet_selection = source_config.get('sheet_selection', 'All sheets (combined)')
+                            sheet_name = source_config.get('sheet_name', '')
+                            total_rows = self.process_large_excel_chunked(file_path, output_file, file_name, CHUNK_SIZE, sheet_selection, sheet_name)
+                        else:
+                            total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
                         return pd.DataFrame({'_row_count': [total_rows], '_source_file': [file_name]})
             
             else:
                 # Folder processing with memory management
                 input_folder = source_config.get('folder_path')
-                file_pattern = source_config.get('file_pattern', '*.csv')
                 
-                # Find all CSV files
-                csv_pattern = os.path.join(input_folder, file_pattern)
-                csv_files = glob.glob(csv_pattern)
+                if file_type == 'excel':
+                    file_pattern = source_config.get('file_pattern', '*.xlsx')
+                    # Get both .xlsx and .xls files
+                    files = glob.glob(os.path.join(input_folder, file_pattern))
+                    if file_pattern == '*.xlsx':
+                        files.extend(glob.glob(os.path.join(input_folder, '*.xls')))
+                else:
+                    file_pattern = source_config.get('file_pattern', '*.csv')
+                    files = glob.glob(os.path.join(input_folder, file_pattern))
                 
-                if not csv_files:
-                    raise FileNotFoundError(f"No CSV files found in '{input_folder}' matching pattern '{file_pattern}'")
+                if not files:
+                    file_type_name = "Excel" if file_type == 'excel' else "CSV"
+                    raise FileNotFoundError(f"No {file_type_name} files found in '{input_folder}' matching pattern '{file_pattern}'")
                 
                 # Calculate total size
-                total_size_mb = sum(self.get_file_size_mb(f) for f in csv_files)
-                total_files = len(csv_files)
+                total_size_mb = sum(self.get_file_size_mb(f) for f in files)
+                total_files = len(files)
                 
                 self.progress.emit(
                     self.current_progress,
@@ -516,12 +1039,12 @@ class CSVAutomationWorker(QThread):
                 total_rows = 0
                 first_file = True
                 
-                for i, csv_file in enumerate(csv_files):
+                for i, file_path in enumerate(files):
                     if self.cancel_requested:
                         return None
                     
-                    file_size_mb = self.get_file_size_mb(csv_file)
-                    file_name = os.path.basename(csv_file)
+                    file_size_mb = self.get_file_size_mb(file_path)
+                    file_name = os.path.basename(file_path)
                     
                     # Update progress for each file
                     file_progress = int((i / total_files) * 25)
@@ -537,11 +1060,21 @@ class CSVAutomationWorker(QThread):
                             temp_output = f"temp_chunk_{i}_{uuid.uuid4().hex[:8]}.csv"
                             
                             if file_size_mb > LARGE_FILE_THRESHOLD_MB:
-                                rows_processed = self.process_large_csv_chunked(csv_file, temp_output, file_name, CHUNK_SIZE)
+                                if file_type == 'excel':
+                                    sheet_selection = source_config.get('sheet_selection', 'All sheets (combined)')
+                                    sheet_name = source_config.get('sheet_name', '')
+                                    rows_processed = self.process_large_excel_chunked(file_path, temp_output, file_name, CHUNK_SIZE, sheet_selection, sheet_name)
+                                else:
+                                    rows_processed = self.process_large_csv_chunked(file_path, temp_output, file_name, CHUNK_SIZE)
                             else:
                                 # Normal read but write to temp file
-                                df = pd.read_csv(csv_file, encoding='utf-8')
-                                df['_source_file'] = file_name
+                                if file_type == 'excel':
+                                    sheet_selection = source_config.get('sheet_selection', 'All sheets (combined)')
+                                    sheet_name = source_config.get('sheet_name', '')
+                                    df = self.read_excel_file(file_path, file_name, sheet_selection, sheet_name)
+                                else:
+                                    df = pd.read_csv(file_path, encoding='utf-8')
+                                    df['_source_file'] = file_name
                                 df.to_csv(temp_output, index=False, encoding='utf-8')
                                 rows_processed = len(df)
                                 del df  # Free memory immediately
@@ -583,8 +1116,27 @@ class CSVAutomationWorker(QThread):
                         else:
                             # Normal processing for small files
                             try:
-                                df = pd.read_csv(csv_file, encoding='utf-8')
-                                df['_source_file'] = file_name
+                                if file_type == 'excel':
+                                    sheet_selection = source_config.get('sheet_selection', 'All sheets (combined)')
+                                    sheet_name = source_config.get('sheet_name', '')
+                                    df = self.read_excel_file(file_path, file_name, sheet_selection, sheet_name)
+                                else:
+                                    df = pd.read_csv(file_path, encoding='utf-8')
+                                    df['_source_file'] = file_name
+                                
+                                # Normalize columns if this is not the first file
+                                if not first_file and file_type == 'excel':
+                                    # For Excel files, we might need to handle column mismatches
+                                    # Read the first few lines of the existing file to get current columns
+                                    try:
+                                        existing_df = pd.read_csv(output_file, nrows=0)
+                                        existing_columns = existing_df.columns.tolist()
+                                        
+                                        # Normalize current dataframe to match existing columns
+                                        df = df.reindex(columns=existing_columns, fill_value=None)
+                                    except:
+                                        # If we can't read existing file, proceed normally
+                                        pass
                                 
                                 # Write to output file
                                 mode = 'w' if first_file else 'a'
@@ -596,21 +1148,26 @@ class CSVAutomationWorker(QThread):
                                 del df  # Free memory immediately
                                 
                             except (pd.errors.DtypeWarning, pd.errors.ParserError, ValueError) as e:
-                                # Fallback to string reading for problematic files
-                                logger.warning(f"Type issues with {csv_file}, reading as strings: {e}")
-                                df = pd.read_csv(csv_file, encoding='utf-8', dtype=str)
-                                df['_source_file'] = file_name
-                                
-                                mode = 'w' if first_file else 'a'
-                                header = first_file
-                                df.to_csv(output_file, mode=mode, header=header, index=False, encoding='utf-8')
-                                
-                                total_rows += len(df)
-                                first_file = False
-                                del df  # Free memory immediately
+                                # Fallback to string reading for problematic CSV files
+                                if file_type == 'csv':
+                                    logger.warning(f"Type issues with {file_path}, reading as strings: {e}")
+                                    df = pd.read_csv(file_path, encoding='utf-8', dtype=str)
+                                    df['_source_file'] = file_name
+                                    
+                                    mode = 'w' if first_file else 'a'
+                                    header = first_file
+                                    df.to_csv(output_file, mode=mode, header=header, index=False, encoding='utf-8')
+                                    
+                                    total_rows += len(df)
+                                    first_file = False
+                                    del df  # Free memory immediately
+                                else:
+                                    # For Excel files, skip problematic files
+                                    logger.warning(f"Skipping problematic Excel file {file_path}: {e}")
+                                    continue
                         
                     except Exception as e:
-                        logger.error(f"Error reading {csv_file}: {str(e)}")
+                        logger.error(f"Error reading {file_path}: {str(e)}")
                         # Continue with other files instead of failing completely
                         continue
                 
@@ -1211,6 +1768,7 @@ class CSVAutomationDialog(QDialog):
         if self.worker:
             self.worker.cancel()
             self.worker.wait()
+            self.worker.deleteLater()
             self.worker = None
         
         self.execute_btn.setEnabled(True)
@@ -1226,7 +1784,12 @@ class CSVAutomationDialog(QDialog):
         """Handle automation completion"""
         self.execute_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
-        self.worker = None
+        
+        # Properly clean up the worker thread
+        if self.worker:
+            self.worker.wait()  # Wait for thread to finish
+            self.worker.deleteLater()  # Schedule for deletion
+            self.worker = None
         
         if success:
             result_text = f"Automation completed successfully!\n\n"
@@ -1252,7 +1815,12 @@ class CSVAutomationDialog(QDialog):
         """Handle automation error"""
         self.execute_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
-        self.worker = None
+        
+        # Properly clean up the worker thread
+        if self.worker:
+            self.worker.wait()  # Wait for thread to finish
+            self.worker.deleteLater()  # Schedule for deletion
+            self.worker = None
         
         QMessageBox.critical(self, "Error", f"Automation failed:\n{error_message}")
         self.progress_label.setText("Automation failed")
@@ -1336,25 +1904,8 @@ class CSVAutomationDialog(QDialog):
                     self.add_csv_source()
                     source_widget = self.csv_sources[-1]
                 
-                # Set source configuration
-                source_widget.table_line.setText(source_config.get('table_name', ''))
-                
-                # Handle mode-specific configuration
-                mode = source_config.get('mode', 'folder')  # Default to folder for backward compatibility
-                if mode == 'file':
-                    source_widget.mode_combo.setCurrentText("Single File")
-                    source_widget.current_mode = 'file'
-                    source_widget.update_ui_for_mode()
-                    source_widget.path_line.setText(source_config.get('file_path', ''))
-                else:
-                    source_widget.mode_combo.setCurrentText("Folder (Multiple Files)")
-                    source_widget.current_mode = 'folder'
-                    source_widget.update_ui_for_mode()
-                    source_widget.path_line.setText(source_config.get('folder_path', ''))
-                    source_widget.pattern_line.setText(source_config.get('file_pattern', '*.csv'))
-                
-                # Trigger updates
-                source_widget.on_path_changed()
+                # Set source configuration using the new method
+                source_widget.set_config(source_config)
             
             # Load SQL query
             sql_query = config.get('sql_query', '')

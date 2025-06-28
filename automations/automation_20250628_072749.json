@@ -1,0 +1,39 @@
+{
+  "version": "1.0",
+  "created": "2025-06-28T07:27:49.877848",
+  "description": "CSV Automation Configuration",
+  "sources": [
+    {
+      "table_name": "csv",
+      "mode": "csv_folder",
+      "file_type": "csv",
+      "folder_path": "C:/Users/nbaba/Desktop/csv",
+      "file_pattern": "*.csv"
+    },
+    {
+      "table_name": "test_data_10m",
+      "mode": "csv_file",
+      "file_type": "csv",
+      "file_path": "C:/Users/nbaba/Desktop/csv/test_data_10M.csv"
+    },
+    {
+      "table_name": "test_excel_bulk",
+      "mode": "excel_folder",
+      "file_type": "excel",
+      "folder_path": "C:/Users/nbaba/Desktop/test_excel_bulk",
+      "file_pattern": "*.xlsx",
+      "sheet_selection": "First sheet only",
+      "sheet_name": ""
+    },
+    {
+      "table_name": "test_data_1m",
+      "mode": "excel_file",
+      "file_type": "excel",
+      "file_path": "C:/Users/nbaba/Desktop/test_excel_bulk/test_data_1M.xlsx",
+      "sheet_selection": "First sheet only",
+      "sheet_name": ""
+    }
+  ],
+  "sql_query": "SELECT * FROM test_data_10m LIMIT 100",
+  "output_table": "testoo"
+}
