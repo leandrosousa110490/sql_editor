@@ -1831,11 +1831,16 @@ class CSVAutomationWorker(QThread):
             self.error.emit(f"Unexpected error: {str(e)}")
 
     def create_unified_column_schema(self, files, file_type, source_config):
-        """Scan all files to create a unified column schema"""
-        all_columns = set()
+        """Scan all files to create a unified column schema with original order preserved"""
+        # Keep track of column order - first file determines base order
+        base_columns = []
+        additional_columns = set()
+        first_file_processed = False
         
         for i, file_path in enumerate(files):
             try:
+                current_file_columns = []
+                
                 if file_type == 'excel':
                     # For Excel files, get columns from first sheet or specified sheet
                     sheet_selection = source_config.get('sheet_selection', 'All sheets (combined)')
@@ -1845,59 +1850,77 @@ class CSVAutomationWorker(QThread):
                         # Read just the first few rows to get column names
                         df_sample = read_excel_optimized(file_path, sheet_name)
                         if df_sample is not None and not df_sample.empty:
-                            file_columns = df_sample.columns.tolist()
-                            all_columns.update(file_columns)
+                            current_file_columns = df_sample.columns.tolist()
                     else:
                         # For multiple sheets, we need to check all sheets
                         try:
                             import openpyxl
                             wb = openpyxl.load_workbook(file_path, read_only=True)
+                            sheet_columns = set()
                             for sheet_name_iter in wb.sheetnames:
                                 try:
                                     df_sample = read_excel_optimized(file_path, sheet_name_iter)
                                     if df_sample is not None and not df_sample.empty:
-                                        file_columns = df_sample.columns.tolist()
-                                        all_columns.update(file_columns)
+                                        sheet_columns.update(df_sample.columns.tolist())
                                 except Exception as e:
                                     logger.warning(f"Could not read sheet {sheet_name_iter} from {file_path}: {e}")
                                     continue
                             wb.close()
+                            current_file_columns = list(sheet_columns)
                         except Exception as e:
                             logger.warning(f"Could not scan Excel file {file_path}: {e}")
                             # Fallback to reading first sheet
                             try:
                                 df_sample = read_excel_optimized(file_path, None)
                                 if df_sample is not None and not df_sample.empty:
-                                    file_columns = df_sample.columns.tolist()
-                                    all_columns.update(file_columns)
+                                    current_file_columns = df_sample.columns.tolist()
                             except:
                                 continue
                 else:
                     # For CSV files, read just the header
                     try:
                         df_sample = pd.read_csv(file_path, nrows=0, encoding='utf-8')
-                        file_columns = df_sample.columns.tolist()
-                        all_columns.update(file_columns)
+                        current_file_columns = df_sample.columns.tolist()
                     except Exception as e:
                         logger.warning(f"Could not read CSV header from {file_path}: {e}")
                         # Try with different encoding
                         try:
                             df_sample = pd.read_csv(file_path, nrows=0, encoding='latin-1')
-                            file_columns = df_sample.columns.tolist()
-                            all_columns.update(file_columns)
+                            current_file_columns = df_sample.columns.tolist()
                         except:
                             continue
+                
+                # Process the columns from this file
+                if current_file_columns:
+                    if not first_file_processed:
+                        # First file - establish base column order
+                        base_columns = current_file_columns.copy()
+                        first_file_processed = True
+                        logger.info(f"Base column order established from first file: {base_columns}")
+                    else:
+                        # Subsequent files - find new columns
+                        for col in current_file_columns:
+                            if col not in base_columns:
+                                additional_columns.add(col)
                 
             except Exception as e:
                 logger.warning(f"Error scanning file {file_path}: {e}")
                 continue
         
-        # Add source file column if not present
-        all_columns.add('_source_file')
+        # Build the unified schema: base columns + additional columns + source file column
+        unified_columns = base_columns.copy()
         
-        # Sort columns for consistent ordering
-        unified_columns = sorted(list(all_columns))
+        # Add new columns at the end, sorted for consistency
+        if additional_columns:
+            new_columns = sorted(list(additional_columns))
+            unified_columns.extend(new_columns)
+            logger.info(f"Added {len(new_columns)} new columns at the end: {new_columns}")
         
+        # Add source file column at the very end if not already present
+        if '_source_file' not in unified_columns:
+            unified_columns.append('_source_file')
+        
+        logger.info(f"Final unified schema ({len(unified_columns)} columns): {unified_columns}")
         return unified_columns
 
     def normalize_dataframe_to_schema(self, df, unified_columns):
