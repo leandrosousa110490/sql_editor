@@ -1464,7 +1464,7 @@ class CSVAutomationWorker(QThread):
 
 
 class CSVAutomationDialog(QDialog):
-    """Main dialog for CSV automation functionality"""
+    """Dialog for configuring and executing CSV automation"""
     
     def __init__(self, parent=None, connection=None, connection_info=None):
         super().__init__(parent)
@@ -1473,8 +1473,18 @@ class CSVAutomationDialog(QDialog):
         self.csv_sources = []
         self.worker = None
         
+        # Store executed automation info for returning to main app
+        self.executed_sql_query = None
+        self.executed_output_table = None
+        self.automation_results = None
+        
+        # Create automations directory if it doesn't exist
+        self.automations_dir = "automations"
+        os.makedirs(self.automations_dir, exist_ok=True)
+        
         self.setWindowTitle("CSV Automation")
-        self.resize(800, 600)
+        self.setModal(True)
+        self.resize(1200, 800)
         self.init_ui()
     
     def init_ui(self):
@@ -1792,6 +1802,11 @@ class CSVAutomationDialog(QDialog):
             self.worker = None
         
         if success:
+            # Store automation results for main app
+            self.automation_results = results
+            self.executed_sql_query = self.sql_editor.toPlainText().strip()
+            self.executed_output_table = results.get('output_table')
+            
             result_text = f"Automation completed successfully!\n\n"
             result_text += f"Sources processed: {results['sources_processed']}\n"
             result_text += f"Total rows loaded: {results['total_rows']:,}\n"
@@ -1802,6 +1817,10 @@ class CSVAutomationDialog(QDialog):
                 result_text += f"Output rows: {results.get('output_rows', 0):,}\n"
             
             result_text += f"Execution time: {results['execution_time']:.2f} seconds"
+            
+            # Add information about SQL query integration
+            if self.executed_sql_query and self.executed_output_table:
+                result_text += f"\n\n🚀 The executed SQL query will be displayed in the main query editor!"
             
             QMessageBox.information(self, "Success", result_text)
             
@@ -2260,12 +2279,23 @@ class CSVAutomationDialog(QDialog):
                     break
         except:
             pass  # If selection fails, it's not critical
+    
+    def get_executed_automation_info(self):
+        """Get information about the executed automation for main app integration"""
+        return {
+            'sql_query': self.executed_sql_query,
+            'output_table': self.executed_output_table,
+            'results': self.automation_results,
+            'has_sql_query': bool(self.executed_sql_query and self.executed_output_table)
+        }
 
 
 def show_csv_automation_dialog(parent=None, connection=None, connection_info=None):
-    """Show the CSV automation dialog"""
+    """Show the CSV automation dialog and return the dialog object for accessing results"""
     dialog = CSVAutomationDialog(parent, connection, connection_info)
-    return dialog.exec()
+    result = dialog.exec()
+    # Return both the result and the dialog object so caller can access executed query info
+    return result, dialog
 
 
 if __name__ == "__main__":

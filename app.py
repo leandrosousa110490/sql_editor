@@ -4110,11 +4110,18 @@ class SQLEditorApp(QMainWindow):
             return
             
         try:
-            show_csv_automation_dialog(self, self.current_connection, self.current_connection_info)
+            # Get both result and dialog object to access automation info
+            result, dialog = show_csv_automation_dialog(self, self.current_connection, self.current_connection_info)
             
             # Always refresh schema browser after dialog closes in case import occurred
             self.refresh_schema_browser()
             self.check_schema_changes()
+            
+            # Check if an automation with SQL query was executed successfully
+            if result == QDialog.DialogCode.Accepted or dialog.automation_results:
+                automation_info = dialog.get_executed_automation_info()
+                if automation_info['has_sql_query']:
+                    self.display_automation_sql_in_editor(automation_info)
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to open CSV automation dialog: {str(e)}")
@@ -4129,6 +4136,55 @@ class SQLEditorApp(QMainWindow):
                 "Settings Saved", 
                 "Lazy loading settings have been saved. Changes will apply to new queries."
             )
+    
+    def display_automation_sql_in_editor(self, automation_info):
+        """Display the executed automation SQL query in the main query editor and execute it"""
+        try:
+            sql_query = automation_info['sql_query']
+            output_table = automation_info['output_table']
+            results = automation_info['results']
+            
+            if not sql_query or not output_table:
+                return
+            
+            # Get current tab or create new one
+            current_tab = self.tab_widget.currentWidget()
+            if not current_tab or current_tab.editor.toPlainText().strip():
+                # Create new tab if current one has content
+                self.add_tab()
+                current_tab = self.tab_widget.currentWidget()
+            
+            # Update tab title to reflect automation
+            tab_index = self.tab_widget.currentIndex()
+            self.tab_widget.setTabText(tab_index, f"Automation SQL - {output_table}")
+            
+            # Set the SQL query in the editor
+            current_tab.editor.setPlainText(sql_query)
+            
+            # Add a comment header to the query for context
+            header_comment = f"""-- CSV Automation Results
+-- Output Table: {output_table}
+-- Sources: {len(results.get('tables_created', []))} tables
+-- Total Rows Processed: {results.get('total_rows', 0):,}
+-- Execution Time: {results.get('execution_time', 0):.2f} seconds
+
+"""
+            
+            # Prepend the header to the existing query
+            full_query = header_comment + sql_query
+            current_tab.editor.setPlainText(full_query)
+            
+            # Show status message
+            self.statusBar().showMessage(
+                f"🚀 Automation SQL loaded! Query creates '{output_table}' with {results.get('output_rows', 0):,} rows", 
+                5000
+            )
+            
+            # Auto-execute the query to show results
+            QTimer.singleShot(500, current_tab.execute_query)
+            
+        except Exception as e:
+            self.statusBar().showMessage(f"Failed to display automation SQL: {str(e)}", 3000)
 
     def start_import_worker(self, import_info):
         """Start the import worker thread with progress dialog"""
