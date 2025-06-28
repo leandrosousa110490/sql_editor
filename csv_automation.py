@@ -17,6 +17,7 @@ from pathlib import Path
 from datetime import datetime
 import openpyxl
 from openpyxl import load_workbook
+import sqlite3
 
 # Polars import for faster Excel processing
 try:
@@ -64,100 +65,190 @@ def clean_column_name(name: str) -> str:
 
 
 def read_excel_optimized(file_path: str, sheet_name: Optional[str] = None) -> pd.DataFrame:
-    """Read Excel file using Polars for maximum speed, fallback to pandas"""
-    try:
-        if POLARS_AVAILABLE:
-            # Try Polars first for maximum speed
-            try:
-                if sheet_name:
-                    df_pl = pl.read_excel(file_path, sheet_name=sheet_name)
-                else:
-                    df_pl = pl.read_excel(file_path)
-                df = df_pl.to_pandas()
-                
-                # Clean column names
-                df.columns = [clean_column_name(col) for col in df.columns]
-                return df
-            except Exception as e:
-                logger.warning(f"Polars failed for {file_path} (sheet: {sheet_name}), using pandas fallback: {e}")
-                # Fallback to pandas
-                pass
-        
-        # Use pandas (either as fallback or if Polars not available)
+    """Read Excel file using Polars for maximum speed, fallback to pandas with robust error handling"""
+    max_retries = 3
+    retry_count = 0
+    
+    while retry_count < max_retries:
         try:
+            if POLARS_AVAILABLE and retry_count == 0:
+                # Try Polars first for maximum speed (only on first attempt)
+                try:
+                    if sheet_name:
+                        df_pl = pl.read_excel(file_path, sheet_name=sheet_name)
+                    else:
+                        df_pl = pl.read_excel(file_path)
+                    df = df_pl.to_pandas()
+                    
+                    # Clean column names
+                    df.columns = [clean_column_name(col) for col in df.columns]
+                    
+                    # Validate result
+                    if df.empty:
+                        logger.warning(f"Polars returned empty dataframe for {file_path}")
+                        raise ValueError("Empty dataframe returned")
+                    
+                    return df
+                    
+                except Exception as e:
+                    logger.warning(f"Polars failed for {file_path} (sheet: {sheet_name}), trying pandas: {e}")
+                    # Don't increment retry_count for Polars failure, just fall through to pandas
+                    pass
+            
+            # Use pandas (either as fallback or if Polars not available)
+            engines_to_try = []
+            
             if file_path.lower().endswith('.xls'):
-                engine = 'xlrd'  # Faster for old Excel files
+                engines_to_try = ['xlrd', 'openpyxl']
             else:
-                engine = 'openpyxl'  # Faster for new Excel files
-        except:
-            engine = 'openpyxl'
-        
-        if sheet_name:
-            df = pd.read_excel(file_path, sheet_name=sheet_name, engine=engine)
-        else:
-            df = pd.read_excel(file_path, engine=engine)
-        
-        # Clean column names
-        df.columns = [clean_column_name(col) for col in df.columns]
-        return df
-        
-    except Exception as e:
-        logger.error(f"Failed to read Excel file {file_path}: {e}")
-        raise
+                engines_to_try = ['openpyxl', 'xlrd']
+            
+            last_error = None
+            for engine in engines_to_try:
+                try:
+                    if sheet_name:
+                        df = pd.read_excel(file_path, sheet_name=sheet_name, engine=engine)
+                    else:
+                        df = pd.read_excel(file_path, engine=engine)
+                    
+                    # Validate result
+                    if df.empty:
+                        logger.warning(f"Engine {engine} returned empty dataframe for {file_path}")
+                        continue
+                    
+                    # Clean column names
+                    df.columns = [clean_column_name(col) for col in df.columns]
+                    return df
+                    
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"Engine {engine} failed for {file_path}: {e}")
+                    continue
+            
+            # If we get here, all engines failed
+            raise last_error or ValueError("All engines failed")
+            
+        except Exception as e:
+            retry_count += 1
+            if retry_count < max_retries:
+                logger.warning(f"Retry {retry_count}/{max_retries} for {file_path}: {e}")
+                time.sleep(0.5 * retry_count)  # Progressive backoff
+            else:
+                logger.error(f"Failed to read Excel file {file_path} after {max_retries} attempts: {e}")
+                raise ValueError(f"Failed to read Excel file after {max_retries} attempts: {str(e)}")
+    
+    # Should never reach here
+    raise ValueError(f"Unexpected error reading {file_path}")
 
 
 def read_excel_all_sheets_optimized(file_path: str) -> Dict[str, pd.DataFrame]:
-    """Read all sheets from Excel file using Polars optimization"""
-    try:
-        if POLARS_AVAILABLE:
-            try:
-                # Polars doesn't have direct all-sheets reading, so we'll get sheet names first
-                # Use pandas to get sheet names, then read each with Polars
-                excel_file = pd.ExcelFile(file_path)
-                sheet_names = excel_file.sheet_names
-                
-                all_sheets = {}
-                for sheet_name in sheet_names:
-                    try:
-                        df_pl = pl.read_excel(file_path, sheet_name=sheet_name)
-                        df = df_pl.to_pandas()
-                        df.columns = [clean_column_name(col) for col in df.columns]
-                        all_sheets[sheet_name] = df
-                    except Exception as e:
-                        logger.warning(f"Polars failed for sheet {sheet_name}, using pandas: {e}")
-                        # Fallback to pandas for this sheet
-                        try:
-                            engine = 'openpyxl' if not file_path.lower().endswith('.xls') else 'xlrd'
-                        except:
-                            engine = 'openpyxl'
-                        df = pd.read_excel(file_path, sheet_name=sheet_name, engine=engine)
-                        df.columns = [clean_column_name(col) for col in df.columns]
-                        all_sheets[sheet_name] = df
-                
-                return all_sheets
-                
-            except Exception as e:
-                logger.warning(f"Polars batch reading failed for {file_path}, using pandas: {e}")
-                # Fallback to pandas batch reading
-                pass
-        
-        # Pandas fallback
+    """Read all sheets from Excel file using Polars optimization with robust error handling"""
+    max_retries = 2
+    retry_count = 0
+    
+    while retry_count < max_retries:
         try:
-            engine = 'openpyxl' if not file_path.lower().endswith('.xls') else 'xlrd'
-        except:
-            engine = 'openpyxl'
+            if POLARS_AVAILABLE and retry_count == 0:
+                try:
+                    # Polars doesn't have direct all-sheets reading, so we'll get sheet names first
+                    # Use pandas to get sheet names, then read each with Polars
+                    excel_file = pd.ExcelFile(file_path)
+                    sheet_names = excel_file.sheet_names
+                    
+                    if not sheet_names:
+                        raise ValueError("No sheets found in Excel file")
+                    
+                    all_sheets = {}
+                    failed_sheets = []
+                    
+                    for sheet_name in sheet_names:
+                        try:
+                            df_pl = pl.read_excel(file_path, sheet_name=sheet_name)
+                            df = df_pl.to_pandas()
+                            
+                            # Validate sheet
+                            if df.empty:
+                                logger.warning(f"Sheet {sheet_name} is empty, skipping")
+                                continue
+                            
+                            df.columns = [clean_column_name(col) for col in df.columns]
+                            all_sheets[sheet_name] = df
+                            
+                        except Exception as e:
+                            logger.warning(f"Polars failed for sheet {sheet_name}, will try pandas fallback: {e}")
+                            failed_sheets.append(sheet_name)
+                            continue
+                    
+                    # If we got some sheets with Polars, try pandas for failed sheets
+                    if failed_sheets and all_sheets:
+                        logger.info(f"Polars succeeded for {len(all_sheets)} sheets, trying pandas for {len(failed_sheets)} failed sheets")
+                        for sheet_name in failed_sheets:
+                            try:
+                                engine = 'openpyxl' if not file_path.lower().endswith('.xls') else 'xlrd'
+                                df = pd.read_excel(file_path, sheet_name=sheet_name, engine=engine)
+                                if not df.empty:
+                                    df.columns = [clean_column_name(col) for col in df.columns]
+                                    all_sheets[sheet_name] = df
+                            except Exception as e:
+                                logger.warning(f"Pandas also failed for sheet {sheet_name}: {e}")
+                                continue
+                    
+                    if all_sheets:
+                        return all_sheets
+                    else:
+                        raise ValueError("No readable sheets found with Polars")
+                        
+                except Exception as e:
+                    logger.warning(f"Polars batch reading failed for {file_path}, using pandas fallback: {e}")
+                    # Fall through to pandas
+                    pass
             
-        all_sheets = pd.read_excel(file_path, sheet_name=None, engine=engine)
-        
-        # Clean column names for all sheets
-        for sheet_name, df in all_sheets.items():
-            df.columns = [clean_column_name(col) for col in df.columns]
-        
-        return all_sheets
-        
-    except Exception as e:
-        logger.error(f"Failed to read Excel file {file_path}: {e}")
-        raise
+            # Pandas fallback with multiple engine attempts
+            engines_to_try = ['openpyxl', 'xlrd'] if not file_path.lower().endswith('.xls') else ['xlrd', 'openpyxl']
+            
+            last_error = None
+            for engine in engines_to_try:
+                try:
+                    all_sheets = pd.read_excel(file_path, sheet_name=None, engine=engine)
+                    
+                    if not all_sheets:
+                        raise ValueError("No sheets returned")
+                    
+                    # Clean column names for all sheets and validate
+                    valid_sheets = {}
+                    for sheet_name, df in all_sheets.items():
+                        try:
+                            if not df.empty:
+                                df.columns = [clean_column_name(col) for col in df.columns]
+                                valid_sheets[sheet_name] = df
+                        except Exception as e:
+                            logger.warning(f"Failed to process sheet {sheet_name}: {e}")
+                            continue
+                    
+                    if valid_sheets:
+                        return valid_sheets
+                    else:
+                        raise ValueError("No valid sheets found")
+                        
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"Engine {engine} failed for all sheets in {file_path}: {e}")
+                    continue
+            
+            # If we get here, all engines failed
+            raise last_error or ValueError("All engines failed for all sheets")
+            
+        except Exception as e:
+            retry_count += 1
+            if retry_count < max_retries:
+                logger.warning(f"Retry {retry_count}/{max_retries} for all sheets in {file_path}: {e}")
+                time.sleep(1 * retry_count)  # Progressive backoff
+            else:
+                logger.error(f"Failed to read Excel file {file_path} after {max_retries} attempts: {e}")
+                raise ValueError(f"Failed to read Excel file after {max_retries} attempts: {str(e)}")
+    
+    # Should never reach here
+    raise ValueError(f"Unexpected error reading all sheets from {file_path}")
 
 
 class CSVSourceWidget(QWidget):
@@ -561,22 +652,132 @@ class CSVSourceWidget(QWidget):
 
 
 class CSVAutomationWorker(QThread):
-    """Worker thread for CSV automation processing"""
+    """Worker thread for CSV automation processing with enhanced crash prevention"""
     
     progress = pyqtSignal(int, str)
     finished = pyqtSignal(bool, str, dict)
     error = pyqtSignal(str)
     
-    def __init__(self, connection, sources_config, output_config, sql_query=None):
+    def __init__(self, connection, sources_config, output_config, sql_query=None, connection_info=None):
         super().__init__()
-        self.connection = connection
+        
+        # Store the connection info passed from main app
+        self.connection_info = connection_info
+        
+        # Create a separate connection for automation using the same database file as main app
+        try:
+            if connection_info and connection_info.get('type') and connection_info.get('path'):
+                db_type = connection_info['type'].lower()
+                db_path = connection_info.get('file_path') or connection_info.get('path')
+                
+                if db_path and db_path != ':memory:':
+                    if db_type == 'duckdb':
+                        self.connection = duckdb.connect(db_path)
+                        logger.info(f"Created separate DuckDB connection for automation: {db_path}")
+                    elif db_type in ['sqlite', 'sqlite3']:
+                        import sqlite3
+                        self.connection = sqlite3.connect(db_path)
+                        logger.info(f"Created separate SQLite connection for automation: {db_path}")
+                    else:
+                        # Fallback to using the provided connection
+                        self.connection = connection
+                        logger.info(f"Using provided connection for unsupported type: {db_type}")
+                else:
+                    # In-memory database, use provided connection
+                    self.connection = connection
+                    logger.info("Using provided connection for in-memory database")
+            else:
+                # No connection info provided, use provided connection
+                self.connection = connection
+                logger.info("Using provided connection (no connection info available)")
+                
+        except Exception as e:
+            logger.warning(f"Failed to create separate connection, using provided: {e}")
+            self.connection = connection
+        
         self.sources_config = sources_config
         self.output_config = output_config
         self.sql_query = sql_query
         self.cancel_requested = False
+        self.current_progress = 0
         
+        # Validate connection on initialization
+        if not self.validate_connection():
+            logger.warning("Initial connection validation failed, will attempt reconnection when needed")
+    
     def cancel(self):
         self.cancel_requested = True
+    
+    def validate_connection(self):
+        """Validate and repair DuckDB connection if needed"""
+        try:
+            # Test the connection with a simple query
+            result = self.connection.execute("SELECT 1").fetchone()
+            return result is not None
+        except Exception as e:
+            logger.warning(f"Connection validation failed: {e}")
+            return False
+    
+    def reconnect_if_needed(self):
+        """Reconnect to database if connection is lost"""
+        if not self.validate_connection():
+            try:
+                logger.info("Attempting to reconnect to database...")
+                
+                # Try to close the current connection
+                if hasattr(self.connection, 'close'):
+                    try:
+                        self.connection.close()
+                    except:
+                        pass
+                
+                # Create new connection using the connection info from main app
+                try:
+                    if self.connection_info and self.connection_info.get('type'):
+                        db_type = self.connection_info['type'].lower()
+                        db_path = self.connection_info.get('file_path') or self.connection_info.get('path')
+                        
+                        if db_path and db_path != ':memory:':
+                            if db_type == 'duckdb':
+                                self.connection = duckdb.connect(db_path)
+                                logger.info(f"Successfully reconnected to DuckDB: {db_path}")
+                            elif db_type in ['sqlite', 'sqlite3']:
+                                import sqlite3
+                                self.connection = sqlite3.connect(db_path)
+                                logger.info(f"Successfully reconnected to SQLite: {db_path}")
+                            else:
+                                logger.warning(f"Unsupported database type for reconnection: {db_type}")
+                                return False
+                        else:
+                            logger.warning("No valid database path for reconnection")
+                            return False
+                    else:
+                        # Fallback to main.duckdb (assuming this is the main app pattern)
+                        self.connection = duckdb.connect("main.duckdb")
+                        logger.info("Successfully reconnected to main.duckdb (fallback)")
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to reconnect to original database: {e}")
+                    # Last resort: main.duckdb fallback
+                    try:
+                        self.connection = duckdb.connect("main.duckdb")
+                        logger.info("Successfully reconnected using main.duckdb fallback")
+                    except Exception as e2:
+                        logger.error(f"All reconnection attempts failed: {e2}")
+                        return False
+                
+                # Validate the new connection
+                if self.validate_connection():
+                    logger.info("Database reconnection successful")
+                    return True
+                else:
+                    logger.error("Reconnected but validation failed")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Failed to reconnect to database: {e}")
+                return False
+        return True
     
     def get_file_size_mb(self, file_path):
         """Get file size in MB"""
@@ -667,111 +868,194 @@ class CSVAutomationWorker(QThread):
         return normalized_dfs
     
     def read_excel_file(self, file_path, source_file_name, sheet_selection="All sheets (combined)", sheet_name=""):
-        """Read an Excel file and return a DataFrame - Optimized with Polars for speed"""
-        try:
-            # Get sheet names first (using pandas for sheet discovery)
-            excel_file = pd.ExcelFile(file_path)
-            sheet_names = excel_file.sheet_names
-            
-            dataframes = []
-            
-            if sheet_selection == "First sheet only":
-                # Read only the first sheet using Polars optimization
-                if sheet_names:
-                    try:
-                        df = read_excel_optimized(file_path, sheet_names[0])
-                        df['_source_file'] = source_file_name
-                        df['_source_sheet'] = sheet_names[0]
-                        dataframes.append(df)
-                    except Exception as e:
-                        logger.warning(f"Could not read first sheet '{sheet_names[0]}' from {file_path}: {e}")
-                        
-            elif "Specific sheet" in sheet_selection and sheet_name:
-                # Read specific sheet by name using Polars optimization
-                if sheet_name in sheet_names:
-                    try:
-                        df = read_excel_optimized(file_path, sheet_name)
-                        df['_source_file'] = source_file_name
-                        df['_source_sheet'] = sheet_name
-                        dataframes.append(df)
-                    except Exception as e:
-                        logger.warning(f"Could not read sheet '{sheet_name}' from {file_path}: {e}")
-                else:
-                    logger.warning(f"Sheet '{sheet_name}' not found in {file_path}. Available sheets: {sheet_names}")
-                    # Fall back to first sheet
+        """Read an Excel file and return a DataFrame - Crash-resistant with Polars optimization"""
+        max_attempts = 3
+        attempt = 0
+        
+        while attempt < max_attempts:
+            try:
+                # Validate file exists and is readable
+                if not os.path.exists(file_path):
+                    raise FileNotFoundError(f"Excel file not found: {file_path}")
+                
+                if os.path.getsize(file_path) == 0:
+                    raise ValueError(f"Excel file is empty: {file_path}")
+                
+                # Get sheet names with error handling
+                try:
+                    excel_file = pd.ExcelFile(file_path)
+                    sheet_names = excel_file.sheet_names
+                    excel_file.close()  # Explicitly close to free resources
+                except Exception as e:
+                    logger.warning(f"Could not read sheet names from {file_path}: {e}")
+                    if attempt < max_attempts - 1:
+                        attempt += 1
+                        time.sleep(0.5)
+                        continue
+                    else:
+                        raise
+                
+                if not sheet_names:
+                    raise ValueError(f"No sheets found in Excel file: {file_path}")
+                
+                dataframes = []
+                successful_sheets = 0
+                failed_sheets = []
+                
+                if sheet_selection == "First sheet only":
+                    # Read only the first sheet using crash-resistant method
                     if sheet_names:
                         try:
                             df = read_excel_optimized(file_path, sheet_names[0])
                             df['_source_file'] = source_file_name
                             df['_source_sheet'] = sheet_names[0]
                             dataframes.append(df)
+                            successful_sheets += 1
                         except Exception as e:
-                            logger.warning(f"Could not read fallback sheet '{sheet_names[0]}' from {file_path}: {e}")
-            else:
-                # Read all sheets and combine them (default behavior)
-                # Use Polars-optimized batch reading
-                try:
-                    all_sheets = read_excel_all_sheets_optimized(file_path)
-                    
-                    for sheet_name, df in all_sheets.items():
-                        try:
-                            # Add sheet info to track source
-                            df['_source_file'] = source_file_name
-                            df['_source_sheet'] = sheet_name
-                            dataframes.append(df)
-                        except Exception as e:
-                            logger.warning(f"Could not process sheet '{sheet_name}' from {file_path}: {e}")
-                            continue
+                            logger.warning(f"Could not read first sheet '{sheet_names[0]}' from {file_path}: {e}")
+                            failed_sheets.append(sheet_names[0])
                             
-                except Exception as e:
-                    # Fallback to individual sheet reading with Polars optimization
-                    logger.warning(f"Batch reading failed, falling back to individual sheets: {e}")
-                    for sheet_name in sheet_names:
+                elif "Specific sheet" in sheet_selection and sheet_name:
+                    # Read specific sheet by name with fallback
+                    if sheet_name in sheet_names:
                         try:
                             df = read_excel_optimized(file_path, sheet_name)
-                            
-                            # Add sheet info to track source
                             df['_source_file'] = source_file_name
                             df['_source_sheet'] = sheet_name
-                            
                             dataframes.append(df)
-                            
-                        except Exception as e2:
-                            logger.warning(f"Could not read sheet '{sheet_name}' from {file_path}: {e2}")
-                            continue
-            
-            if not dataframes:
-                raise ValueError(f"No readable sheets found in {file_path}")
-            
-            # If only one sheet or single sheet selection, no need to normalize columns
-            if len(dataframes) == 1:
-                return dataframes[0]
-            
-            # Optimize column normalization for multiple sheets
-            if len(dataframes) > 1:
-                # Get unique columns more efficiently
-                all_columns = set()
-                for df in dataframes:
-                    all_columns.update(df.columns)
-                
-                # Only normalize if columns are different
-                first_columns = set(dataframes[0].columns)
-                needs_normalization = any(set(df.columns) != first_columns for df in dataframes[1:])
-                
-                if needs_normalization:
-                    normalized_dfs = self.normalize_column_names(dataframes)
-                    combined_df = pd.concat(normalized_dfs, ignore_index=True, sort=False)
+                            successful_sheets += 1
+                        except Exception as e:
+                            logger.warning(f"Could not read sheet '{sheet_name}' from {file_path}: {e}")
+                            failed_sheets.append(sheet_name)
+                    else:
+                        logger.warning(f"Sheet '{sheet_name}' not found in {file_path}. Available sheets: {sheet_names}")
+                        # Fall back to first sheet with error isolation
+                        if sheet_names:
+                            try:
+                                df = read_excel_optimized(file_path, sheet_names[0])
+                                df['_source_file'] = source_file_name
+                                df['_source_sheet'] = sheet_names[0]
+                                dataframes.append(df)
+                                successful_sheets += 1
+                                logger.info(f"Successfully used fallback sheet '{sheet_names[0]}' from {file_path}")
+                            except Exception as e:
+                                logger.warning(f"Could not read fallback sheet '{sheet_names[0]}' from {file_path}: {e}")
+                                failed_sheets.append(sheet_names[0])
                 else:
-                    # Faster concatenation when columns are already aligned
-                    combined_df = pd.concat(dataframes, ignore_index=True)
+                    # Read all sheets with individual error isolation
+                    try:
+                        # Try batch reading first
+                        all_sheets = read_excel_all_sheets_optimized(file_path)
+                        
+                        for sheet_name_iter, df in all_sheets.items():
+                            try:
+                                # Validate sheet data
+                                if df.empty:
+                                    logger.warning(f"Sheet '{sheet_name_iter}' is empty in {file_path}, skipping")
+                                    continue
+                                
+                                # Add sheet info to track source
+                                df['_source_file'] = source_file_name
+                                df['_source_sheet'] = sheet_name_iter
+                                dataframes.append(df)
+                                successful_sheets += 1
+                            except Exception as e:
+                                logger.warning(f"Could not process sheet '{sheet_name_iter}' from {file_path}: {e}")
+                                failed_sheets.append(sheet_name_iter)
+                                continue
+                                
+                    except Exception as e:
+                        # Fallback to individual sheet reading with error isolation
+                        logger.warning(f"Batch reading failed, trying individual sheets: {e}")
+                        for sheet_name_iter in sheet_names:
+                            try:
+                                df = read_excel_optimized(file_path, sheet_name_iter)
+                                
+                                # Validate sheet data
+                                if df.empty:
+                                    logger.warning(f"Sheet '{sheet_name_iter}' is empty in {file_path}, skipping")
+                                    continue
+                                
+                                # Add sheet info to track source
+                                df['_source_file'] = source_file_name
+                                df['_source_sheet'] = sheet_name_iter
+                                
+                                dataframes.append(df)
+                                successful_sheets += 1
+                                
+                            except Exception as e2:
+                                logger.warning(f"Could not read sheet '{sheet_name_iter}' from {file_path}: {e2}")
+                                failed_sheets.append(sheet_name_iter)
+                                continue
                 
-                return combined_df
-            
-        except Exception as e:
-            logger.error(f"Error reading Excel file {file_path}: {e}")
-            raise ValueError(f"Failed to read Excel file: {str(e)}")
+                # Report results
+                if failed_sheets:
+                    logger.warning(f"Failed to read {len(failed_sheets)} sheet(s) from {file_path}: {failed_sheets}")
+                
+                if not dataframes:
+                    if attempt < max_attempts - 1:
+                        logger.warning(f"No readable sheets found in {file_path}, retrying... (attempt {attempt + 1}/{max_attempts})")
+                        attempt += 1
+                        time.sleep(1)
+                        continue
+                    else:
+                        raise ValueError(f"No readable sheets found in {file_path} after {max_attempts} attempts. Failed sheets: {failed_sheets}")
+                
+                logger.info(f"Successfully read {successful_sheets} sheet(s) from {file_path}")
+                
+                # Handle single vs multiple dataframes with crash protection
+                try:
+                    if len(dataframes) == 1:
+                        return dataframes[0]
+                    
+                    # Combine multiple sheets with error handling
+                    if len(dataframes) > 1:
+                        try:
+                            # Check if column normalization is needed
+                            first_columns = set(dataframes[0].columns)
+                            needs_normalization = any(set(df.columns) != first_columns for df in dataframes[1:])
+                            
+                            if needs_normalization:
+                                logger.info(f"Normalizing columns for {len(dataframes)} sheets from {file_path}")
+                                normalized_dfs = self.normalize_column_names(dataframes)
+                                combined_df = pd.concat(normalized_dfs, ignore_index=True, sort=False)
+                            else:
+                                # Faster concatenation when columns are already aligned
+                                combined_df = pd.concat(dataframes, ignore_index=True)
+                            
+                            return combined_df
+                            
+                        except Exception as e:
+                            logger.error(f"Failed to combine sheets from {file_path}: {e}")
+                            # Return the first dataframe as fallback
+                            logger.info(f"Falling back to first sheet only from {file_path}")
+                            return dataframes[0]
+                
+                except Exception as e:
+                    logger.error(f"Error processing dataframes from {file_path}: {e}")
+                    if attempt < max_attempts - 1:
+                        attempt += 1
+                        time.sleep(1)
+                        continue
+                    else:
+                        raise
+                
+                # Should not reach here
+                return dataframes[0] if dataframes else None
+                
+            except Exception as e:
+                attempt += 1
+                if attempt < max_attempts:
+                    logger.warning(f"Excel reading attempt {attempt}/{max_attempts} failed for {file_path}: {e}")
+                    time.sleep(1 * attempt)  # Progressive backoff
+                else:
+                    logger.error(f"All {max_attempts} attempts failed for Excel file {file_path}: {e}")
+                    raise ValueError(f"Failed to read Excel file after {max_attempts} attempts: {str(e)}")
+        
+        # Should never reach here
+        raise ValueError(f"Unexpected error reading Excel file {file_path}")
     
-    def process_large_excel_chunked(self, file_path, output_file, source_file_name, chunk_size=10000, sheet_selection="All sheets (combined)", sheet_name=""):
+    def process_large_excel_chunked(self, file_path, output_file, source_file_name, chunk_size=10000, sheet_selection="All sheets (combined)", sheet_name="", unified_columns=None):
         """Process large Excel files in chunks using Polars optimization"""
         try:
             total_rows = 0
@@ -806,6 +1090,10 @@ class CSVAutomationWorker(QThread):
                     df['_source_file'] = source_file_name
                     df['_source_sheet'] = sheet_name
                     
+                    # Normalize to unified schema if provided
+                    if unified_columns is not None:
+                        df = self.normalize_dataframe_to_schema(df, unified_columns)
+                    
                     # Process in chunks if the sheet is large
                     for i in range(0, len(df), chunk_size):
                         chunk = df.iloc[i:i+chunk_size].copy()
@@ -837,7 +1125,7 @@ class CSVAutomationWorker(QThread):
             logger.error(f"Error processing large Excel file {file_path}: {e}")
             raise ValueError(f"Failed to process large Excel file: {str(e)}")
     
-    def process_large_csv_chunked(self, file_path, output_file, source_file_name, chunk_size=500000):
+    def process_large_csv_chunked(self, file_path, output_file, source_file_name, chunk_size=500000, unified_columns=None):
         """Process large CSV files in chunks to prevent memory issues"""
         try:
             total_rows = 0
@@ -858,6 +1146,10 @@ class CSVAutomationWorker(QThread):
                 
                 # Add source file column
                 chunk['_source_file'] = source_file_name
+                
+                # Normalize to unified schema if provided
+                if unified_columns is not None:
+                    chunk = self.normalize_dataframe_to_schema(chunk, unified_columns)
                 
                 # Write chunk (append after first chunk)
                 mode = 'w' if first_chunk else 'a'
@@ -920,9 +1212,9 @@ class CSVAutomationWorker(QThread):
                     )
                     
                     if file_type == 'excel':
-                        total_rows = self.process_large_excel_chunked(file_path, output_file, file_name, CHUNK_SIZE)
+                        total_rows = self.process_large_excel_chunked(file_path, output_file, file_name, CHUNK_SIZE, unified_columns=None)
                     else:
-                        total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
+                        total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE, unified_columns=None)
                     
                     self.progress.emit(
                         self.current_progress + 25,
@@ -979,14 +1271,14 @@ class CSVAutomationWorker(QThread):
                                 
                             except Exception as e2:
                                 logger.warning(f"String reading also failed for {file_path}, switching to chunked: {e2}")
-                                total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
+                                total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE, unified_columns=None)
                                 return pd.DataFrame({'_row_count': [total_rows], '_source_file': [file_name]})
                         else:
                             # For Excel files, switch to chunked processing
                             logger.warning(f"Excel processing failed for {file_path}, switching to chunked: {e}")
                             sheet_selection = source_config.get('sheet_selection', 'All sheets (combined)')
                             sheet_name = source_config.get('sheet_name', '')
-                            total_rows = self.process_large_excel_chunked(file_path, output_file, file_name, CHUNK_SIZE, sheet_selection, sheet_name)
+                            total_rows = self.process_large_excel_chunked(file_path, output_file, file_name, CHUNK_SIZE, sheet_selection, sheet_name, unified_columns=None)
                             return pd.DataFrame({'_row_count': [total_rows], '_source_file': [file_name]})
                         
                     except MemoryError:
@@ -995,9 +1287,9 @@ class CSVAutomationWorker(QThread):
                         if file_type == 'excel':
                             sheet_selection = source_config.get('sheet_selection', 'All sheets (combined)')
                             sheet_name = source_config.get('sheet_name', '')
-                            total_rows = self.process_large_excel_chunked(file_path, output_file, file_name, CHUNK_SIZE, sheet_selection, sheet_name)
+                            total_rows = self.process_large_excel_chunked(file_path, output_file, file_name, CHUNK_SIZE, sheet_selection, sheet_name, unified_columns=None)
                         else:
-                            total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE)
+                            total_rows = self.process_large_csv_chunked(file_path, output_file, file_name, CHUNK_SIZE, unified_columns=None)
                         return pd.DataFrame({'_row_count': [total_rows], '_source_file': [file_name]})
             
             else:
@@ -1027,13 +1319,22 @@ class CSVAutomationWorker(QThread):
                     f"Found {total_files} files ({total_size_mb:.1f} MB) in {source_name}"
                 )
                 
+                # First pass: Scan all files to determine unified column schema
+                self.progress.emit(
+                    self.current_progress + 2,
+                    f"Scanning {total_files} files to determine column schema..."
+                )
+                
+                unified_columns = self.create_unified_column_schema(files, file_type, source_config)
+                logger.info(f"Unified schema has {len(unified_columns)} columns: {unified_columns}")
+                
                 # Use chunked processing if total size is large
                 use_chunked = total_size_mb > MAX_MEMORY_USAGE_MB
                 
                 if use_chunked:
                     self.progress.emit(
-                        self.current_progress + 2,
-                        f"Large dataset detected - using memory-safe processing..."
+                        self.current_progress + 5,
+                        f"Large dataset detected - using memory-safe processing with unified schema..."
                     )
                 
                 total_rows = 0
@@ -1063,9 +1364,9 @@ class CSVAutomationWorker(QThread):
                                 if file_type == 'excel':
                                     sheet_selection = source_config.get('sheet_selection', 'All sheets (combined)')
                                     sheet_name = source_config.get('sheet_name', '')
-                                    rows_processed = self.process_large_excel_chunked(file_path, temp_output, file_name, CHUNK_SIZE, sheet_selection, sheet_name)
+                                    rows_processed = self.process_large_excel_chunked(file_path, temp_output, file_name, CHUNK_SIZE, sheet_selection, sheet_name, unified_columns)
                                 else:
-                                    rows_processed = self.process_large_csv_chunked(file_path, temp_output, file_name, CHUNK_SIZE)
+                                    rows_processed = self.process_large_csv_chunked(file_path, temp_output, file_name, CHUNK_SIZE, unified_columns)
                             else:
                                 # Normal read but write to temp file
                                 if file_type == 'excel':
@@ -1075,6 +1376,9 @@ class CSVAutomationWorker(QThread):
                                 else:
                                     df = pd.read_csv(file_path, encoding='utf-8')
                                     df['_source_file'] = file_name
+                                
+                                # Normalize to unified schema
+                                df = self.normalize_dataframe_to_schema(df, unified_columns)
                                 df.to_csv(temp_output, index=False, encoding='utf-8')
                                 rows_processed = len(df)
                                 del df  # Free memory immediately
@@ -1124,19 +1428,8 @@ class CSVAutomationWorker(QThread):
                                     df = pd.read_csv(file_path, encoding='utf-8')
                                     df['_source_file'] = file_name
                                 
-                                # Normalize columns if this is not the first file
-                                if not first_file and file_type == 'excel':
-                                    # For Excel files, we might need to handle column mismatches
-                                    # Read the first few lines of the existing file to get current columns
-                                    try:
-                                        existing_df = pd.read_csv(output_file, nrows=0)
-                                        existing_columns = existing_df.columns.tolist()
-                                        
-                                        # Normalize current dataframe to match existing columns
-                                        df = df.reindex(columns=existing_columns, fill_value=None)
-                                    except:
-                                        # If we can't read existing file, proceed normally
-                                        pass
+                                # Normalize to unified schema (works for both CSV and Excel)
+                                df = self.normalize_dataframe_to_schema(df, unified_columns)
                                 
                                 # Write to output file
                                 mode = 'w' if first_file else 'a'
@@ -1153,6 +1446,9 @@ class CSVAutomationWorker(QThread):
                                     logger.warning(f"Type issues with {file_path}, reading as strings: {e}")
                                     df = pd.read_csv(file_path, encoding='utf-8', dtype=str)
                                     df['_source_file'] = file_name
+                                    
+                                    # Normalize to unified schema
+                                    df = self.normalize_dataframe_to_schema(df, unified_columns)
                                     
                                     mode = 'w' if first_file else 'a'
                                     header = first_file
@@ -1261,15 +1557,26 @@ class CSVAutomationWorker(QThread):
                         f"Loading {source_config['table_name']} into database..."
                     )
                     
-                    # Load into DuckDB
+                    # Load into DuckDB with connection validation and crash prevention
                     table_name = source_config['table_name']
                     
-                    # Check if table exists first for progress reporting
+                    # Validate connection before database operations
+                    if not self.reconnect_if_needed():
+                        raise ConnectionError("Failed to establish database connection")
+                    
+                    # Check if table exists first for progress reporting with error handling
                     table_exists = False
                     try:
-                        result = self.connection.execute(f"SELECT 1 FROM {table_name} LIMIT 1").fetchone()
-                        table_exists = result is not None
-                    except:
+                        self.connection.execute("BEGIN TRANSACTION")  # Start transaction for safety
+                        result = self.connection.execute(f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{table_name}'").fetchone()
+                        table_exists = result[0] > 0 if result else False
+                        self.connection.execute("COMMIT")  # Commit transaction
+                    except Exception as e:
+                        try:
+                            self.connection.execute("ROLLBACK")  # Rollback on error
+                        except:
+                            pass
+                        logger.warning(f"Could not check table existence for {table_name}: {e}")
                         table_exists = False
                     
                     if table_exists:
@@ -1278,85 +1585,146 @@ class CSVAutomationWorker(QThread):
                             f"Replacing existing table '{table_name}'..."
                         )
                     
-                    # Always drop the table if it exists to ensure clean replacement
-                    self.connection.execute(f"DROP TABLE IF EXISTS {table_name}")
-                    
                     # Use absolute path for temp file to avoid path issues
                     temp_output_abs = os.path.abspath(temp_output)
                     
-                    # Ensure temp file exists before trying to load it
+                    # Ensure temp file exists and is readable before trying to load it
                     if not os.path.exists(temp_output_abs):
                         raise FileNotFoundError(f"Temp file not found: {temp_output_abs}")
                     
-                    # Load with proper path escaping
-                    escaped_path = temp_output_abs.replace('\\', '\\\\').replace("'", "''")
+                    if os.path.getsize(temp_output_abs) == 0:
+                        raise ValueError(f"Temp file is empty: {temp_output_abs}")
                     
-                    # Execute with timeout protection
-                    import signal
+                    # Load with robust error handling and multiple fallback strategies
+                    load_success = False
+                    last_error = None
                     
-                    def timeout_handler(signum, frame):
-                        raise TimeoutError("Database operation timed out")
-                    
+                    # Strategy 1: DuckDB native CSV loading with transaction safety
                     try:
-                        # Set timeout for large file loads (5 minutes)
-                        if hasattr(signal, 'SIGALRM'):  # Unix systems
-                            signal.signal(signal.SIGALRM, timeout_handler)
-                            signal.alarm(300)  # 5 minutes
+                        self.progress.emit(
+                            self.current_progress + 30,
+                            f"Loading {table_name} with DuckDB native reader..."
+                        )
                         
-                        # Try multiple approaches for robust CSV loading
+                        # Start transaction for atomic operation
+                        self.connection.execute("BEGIN TRANSACTION")
+                        
+                        # Drop table if exists (inside transaction)
+                        self.connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+                        
+                        # Load with proper path escaping and robust settings
+                        escaped_path = temp_output_abs.replace('\\', '\\\\').replace("'", "''")
+                        
+                        self.connection.execute(f"""
+                            CREATE TABLE {table_name} AS 
+                            SELECT * FROM read_csv_auto('{escaped_path}', 
+                                sample_size=10000,
+                                ignore_errors=true,
+                                null_padding=true,
+                                header=true
+                            )
+                        """)
+                        
+                        # Validate table was created successfully
+                        result = self.connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+                        if result and result[0] >= 0:
+                            self.connection.execute("COMMIT")  # Commit successful transaction
+                            load_success = True
+                            logger.info(f"Successfully loaded {result[0]} rows into {table_name}")
+                        else:
+                            raise ValueError("Table creation validation failed")
+                            
+                    except Exception as e1:
                         try:
-                            # First attempt: Use read_csv_auto with flexible settings
+                            self.connection.execute("ROLLBACK")  # Rollback failed transaction
+                        except:
+                            pass
+                        last_error = e1
+                        logger.warning(f"DuckDB native loading failed for {table_name}: {e1}")
+                    
+                    # Strategy 2: Force all VARCHAR columns if native loading failed
+                    if not load_success:
+                        try:
                             self.progress.emit(
                                 self.current_progress + 32,
-                                f"Loading {table_name} with auto-detection..."
+                                f"Loading {table_name} as text (fallback mode)..."
                             )
+                            
+                            if not self.reconnect_if_needed():
+                                raise ConnectionError("Connection lost during fallback loading")
+                            
+                            self.connection.execute("BEGIN TRANSACTION")
+                            self.connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+                            
                             self.connection.execute(f"""
                                 CREATE TABLE {table_name} AS 
                                 SELECT * FROM read_csv_auto('{escaped_path}', 
-                                    sample_size=-1,
+                                    all_varchar=true,
                                     ignore_errors=true,
-                                    null_padding=true
+                                    null_padding=true,
+                                    header=true
                                 )
                             """)
-                        except Exception as e1:
-                            logger.warning(f"Auto-detection failed for {table_name}, trying with all VARCHAR: {e1}")
-                            try:
-                                # Second attempt: Force all columns as VARCHAR to avoid type issues
-                                self.progress.emit(
-                                    self.current_progress + 32,
-                                    f"Loading {table_name} as text (type detection failed)..."
-                                )
-                                self.connection.execute(f"""
-                                    CREATE TABLE {table_name} AS 
-                                    SELECT * FROM read_csv_auto('{escaped_path}', 
-                                        all_varchar=true,
-                                        ignore_errors=true,
-                                        null_padding=true
-                                    )
-                                """)
-                            except Exception as e2:
-                                logger.warning(f"All VARCHAR failed for {table_name}, trying manual approach: {e2}")
-                                # Third attempt: Use basic CSV reading
-                                self.progress.emit(
-                                    self.current_progress + 32,
-                                    f"Loading {table_name} with basic CSV reader..."
-                                )
-                                self.connection.execute(f"""
-                                    CREATE TABLE {table_name} AS 
-                                    SELECT * FROM read_csv('{escaped_path}', 
-                                        auto_detect=true,
-                                        ignore_errors=true,
-                                        header=true
-                                    )
-                                """)
-                        
-                        if hasattr(signal, 'SIGALRM'):
-                            signal.alarm(0)  # Cancel timeout
                             
-                    except TimeoutError:
-                        if hasattr(signal, 'SIGALRM'):
-                            signal.alarm(0)  # Cancel timeout
-                        raise TimeoutError(f"Database loading timeout for {table_name}. File may be too large.")
+                            # Validate table
+                            result = self.connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+                            if result and result[0] >= 0:
+                                self.connection.execute("COMMIT")
+                                load_success = True
+                                logger.info(f"Successfully loaded {result[0]} rows into {table_name} (VARCHAR mode)")
+                            else:
+                                raise ValueError("Table creation validation failed")
+                                
+                        except Exception as e2:
+                            try:
+                                self.connection.execute("ROLLBACK")
+                            except:
+                                pass
+                            last_error = e2
+                            logger.warning(f"VARCHAR loading failed for {table_name}: {e2}")
+                    
+                    # Strategy 3: Basic CSV reader as last resort
+                    if not load_success:
+                        try:
+                            self.progress.emit(
+                                self.current_progress + 34,
+                                f"Loading {table_name} with basic CSV reader (last resort)..."
+                            )
+                            
+                            if not self.reconnect_if_needed():
+                                raise ConnectionError("Connection lost during basic loading")
+                            
+                            self.connection.execute("BEGIN TRANSACTION")
+                            self.connection.execute(f"DROP TABLE IF EXISTS {table_name}")
+                            
+                            self.connection.execute(f"""
+                                CREATE TABLE {table_name} AS 
+                                SELECT * FROM read_csv('{escaped_path}', 
+                                    header=true,
+                                    auto_detect=false,
+                                    ignore_errors=true
+                                )
+                            """)
+                            
+                            # Validate table
+                            result = self.connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()
+                            if result and result[0] >= 0:
+                                self.connection.execute("COMMIT")
+                                load_success = True
+                                logger.info(f"Successfully loaded {result[0]} rows into {table_name} (basic mode)")
+                            else:
+                                raise ValueError("Table creation validation failed")
+                                
+                        except Exception as e3:
+                            try:
+                                self.connection.execute("ROLLBACK")
+                            except:
+                                pass
+                            last_error = e3
+                            logger.error(f"All loading strategies failed for {table_name}: {e3}")
+                    
+                    if not load_success:
+                        raise ValueError(f"Failed to load table {table_name} after trying all strategies. Last error: {last_error}")
                     
                     # Clean up temp file
                     if os.path.exists(temp_output_abs):
@@ -1461,6 +1829,99 @@ class CSVAutomationWorker(QThread):
             # Clean up temporary files even on error
             self.cleanup_temp_files()
             self.error.emit(f"Unexpected error: {str(e)}")
+
+    def create_unified_column_schema(self, files, file_type, source_config):
+        """Scan all files to create a unified column schema"""
+        all_columns = set()
+        
+        for i, file_path in enumerate(files):
+            try:
+                if file_type == 'excel':
+                    # For Excel files, get columns from first sheet or specified sheet
+                    sheet_selection = source_config.get('sheet_selection', 'All sheets (combined)')
+                    sheet_name = source_config.get('sheet_name', '')
+                    
+                    if sheet_selection == "First sheet only":
+                        # Read just the first few rows to get column names
+                        df_sample = read_excel_optimized(file_path, sheet_name)
+                        if df_sample is not None and not df_sample.empty:
+                            file_columns = df_sample.columns.tolist()
+                            all_columns.update(file_columns)
+                    else:
+                        # For multiple sheets, we need to check all sheets
+                        try:
+                            import openpyxl
+                            wb = openpyxl.load_workbook(file_path, read_only=True)
+                            for sheet_name_iter in wb.sheetnames:
+                                try:
+                                    df_sample = read_excel_optimized(file_path, sheet_name_iter)
+                                    if df_sample is not None and not df_sample.empty:
+                                        file_columns = df_sample.columns.tolist()
+                                        all_columns.update(file_columns)
+                                except Exception as e:
+                                    logger.warning(f"Could not read sheet {sheet_name_iter} from {file_path}: {e}")
+                                    continue
+                            wb.close()
+                        except Exception as e:
+                            logger.warning(f"Could not scan Excel file {file_path}: {e}")
+                            # Fallback to reading first sheet
+                            try:
+                                df_sample = read_excel_optimized(file_path, None)
+                                if df_sample is not None and not df_sample.empty:
+                                    file_columns = df_sample.columns.tolist()
+                                    all_columns.update(file_columns)
+                            except:
+                                continue
+                else:
+                    # For CSV files, read just the header
+                    try:
+                        df_sample = pd.read_csv(file_path, nrows=0, encoding='utf-8')
+                        file_columns = df_sample.columns.tolist()
+                        all_columns.update(file_columns)
+                    except Exception as e:
+                        logger.warning(f"Could not read CSV header from {file_path}: {e}")
+                        # Try with different encoding
+                        try:
+                            df_sample = pd.read_csv(file_path, nrows=0, encoding='latin-1')
+                            file_columns = df_sample.columns.tolist()
+                            all_columns.update(file_columns)
+                        except:
+                            continue
+                
+            except Exception as e:
+                logger.warning(f"Error scanning file {file_path}: {e}")
+                continue
+        
+        # Add source file column if not present
+        all_columns.add('_source_file')
+        
+        # Sort columns for consistent ordering
+        unified_columns = sorted(list(all_columns))
+        
+        return unified_columns
+
+    def normalize_dataframe_to_schema(self, df, unified_columns):
+        """Normalize a dataframe to match the unified column schema"""
+        if df is None or df.empty:
+            return df
+        
+        # Create a new dataframe with all unified columns
+        normalized_df = pd.DataFrame(index=df.index)
+        
+        # Copy existing columns
+        for col in df.columns:
+            if col in unified_columns:
+                normalized_df[col] = df[col]
+        
+        # Add missing columns with None values
+        for col in unified_columns:
+            if col not in normalized_df.columns:
+                normalized_df[col] = None
+        
+        # Reorder columns to match unified schema
+        normalized_df = normalized_df[unified_columns]
+        
+        return normalized_df
 
 
 class CSVAutomationDialog(QDialog):
@@ -1759,7 +2220,7 @@ class CSVAutomationDialog(QDialog):
         
         # Start worker thread
         self.worker = CSVAutomationWorker(
-            self.connection, sources_config, output_config, sql_query
+            self.connection, sources_config, output_config, sql_query, self.connection_info
         )
         
         self.worker.progress.connect(self.update_progress)

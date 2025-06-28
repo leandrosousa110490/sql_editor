@@ -3110,19 +3110,114 @@ class SchemaBrowser(QTreeWidget):
         self.fk_icon = qta.icon('fa5s.link', color=ColorScheme.WARNING)
     
     def load_schema(self, connection, connection_info):
-        self.clear()
-        
-        # Store connection references for context menu operations
+        """Load database schema with enhanced connection validation and recovery"""
+        # Store connection references
         self.connection = connection
         self.connection_info = connection_info
         
-        db_type = connection_info["type"].lower()
-        if db_type in ["sqlite", "sqlite3"]:
-            self.load_sqlite_schema(connection)
-        elif db_type == "duckdb":
-            self.load_duckdb_schema(connection)
-        else:
-            print(f"Unknown database type: {connection_info['type']}")
+        # Enhanced connection validation with multiple fallback strategies
+        max_attempts = 3
+        attempt = 0
+        
+        while attempt < max_attempts:
+            try:
+                # Test connection before proceeding
+                test_result = connection.execute("SELECT 1 AS test").fetchone()
+                if not test_result:
+                    raise Exception("Connection test returned no result")
+                
+                # Connection is valid, proceed with schema loading
+                break
+                
+            except Exception as e:
+                print(f"Schema browser connection validation failed (attempt {attempt + 1}): {e}")
+                attempt += 1
+                
+                if attempt < max_attempts:
+                    # Try to get a fresh connection from the main app
+                    try:
+                        # Get the main app reference
+                        main_app = self.parent()
+                        while main_app and not hasattr(main_app, 'current_connection'):
+                            main_app = main_app.parent()
+                        
+                        if main_app and hasattr(main_app, 'reconnect_current_database'):
+                            print(f"Attempting to reconnect via main app...")
+                            if main_app.reconnect_current_database():
+                                connection = main_app.current_connection
+                                connection_info = main_app.current_connection_info
+                                self.connection = connection
+                                self.connection_info = connection_info
+                                print("Successfully got fresh connection from main app")
+                                continue
+                            else:
+                                print("Main app reconnection failed")
+                        
+                        # Fallback: try to create a new connection directly
+                        if connection_info and 'type' in connection_info:
+                            db_type = connection_info['type'].lower()
+                            file_path = connection_info.get('file_path') or connection_info.get('path')
+                            
+                            if file_path and os.path.exists(file_path):
+                                if db_type in ['sqlite', 'sqlite3']:
+                                    connection = sqlite3.connect(file_path)
+                                elif db_type == 'duckdb':
+                                    connection = duckdb.connect(file_path)
+                                else:
+                                    raise ValueError(f"Unsupported database type: {db_type}")
+                                
+                                self.connection = connection
+                                print(f"Created new {db_type} connection directly")
+                                continue
+                            else:
+                                print(f"Database file not found or no path: {file_path}")
+                        
+                    except Exception as conn_e:
+                        print(f"Connection recovery failed: {conn_e}")
+                
+                # If this is the last attempt, clear the schema and return
+                if attempt >= max_attempts:
+                    print("All connection attempts failed, clearing schema browser")
+                    self.clear()
+                    return
+        
+        # Clear existing items
+        self.clear()
+        
+        # Reset schema data collections
+        self.table_names = []
+        self.column_names = []
+        
+        # Load schema based on database type with error handling
+        try:
+            db_type = connection_info["type"].lower()
+            if db_type in ["sqlite", "sqlite3"]:
+                self.load_sqlite_schema(connection)
+            elif db_type == "duckdb":
+                self.load_duckdb_schema(connection)
+            else:
+                print(f"Unknown database type: {connection_info['type']}")
+                return
+                
+        except Exception as e:
+            print(f"Schema loading failed after successful connection: {e}")
+            # Try one more time with a fresh connection
+            try:
+                main_app = self.parent()
+                while main_app and not hasattr(main_app, 'current_connection'):
+                    main_app = main_app.parent()
+                
+                if main_app and hasattr(main_app, 'reconnect_current_database'):
+                    if main_app.reconnect_current_database():
+                        fresh_connection = main_app.current_connection
+                        if connection_info['type'].lower() in ['sqlite', 'sqlite3']:
+                            self.load_sqlite_schema(fresh_connection)
+                        elif connection_info['type'].lower() == 'duckdb':
+                            self.load_duckdb_schema(fresh_connection)
+            except Exception as retry_e:
+                print(f"Schema loading retry also failed: {retry_e}")
+                self.clear()
+                return
     
     def load_sqlite_schema(self, connection):
         # Clear existing schema data
@@ -3242,26 +3337,72 @@ class SchemaBrowser(QTreeWidget):
                 # Store metadata for context menu
                 table_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'table', 'name': table_name})
                 
-                # Get columns for this table
+                # Get columns for this table with robust connection handling
                 try:
-                    columns_df = connection.execute(f"PRAGMA table_info('{table_name}')").fetchdf()
+                    # Validate connection first
+                    try:
+                        connection.execute("SELECT 1").fetchone()
+                    except Exception:
+                        print(f"Connection issue detected for table {table_name}, skipping column loading")
+                        continue
                     
-                    for _, col_row in columns_df.iterrows():
-                        col_name = col_row['name']
-                        col_type = col_row['type']
-                        is_pk = col_row['pk'] == 1  # Primary key flag
+                    # Try multiple approaches for getting column info
+                    columns_data = None
+                    
+                    # Approach 1: Use PRAGMA table_info
+                    try:
+                        columns_df = connection.execute(f"PRAGMA table_info('{table_name}')").fetchdf()
+                        if not columns_df.empty:
+                            columns_data = [(row['name'], row['type'], row['pk'] == 1) for _, row in columns_df.iterrows()]
+                    except Exception as e1:
+                        print(f"PRAGMA table_info failed for {table_name}: {e1}")
+                    
+                    # Approach 2: Use information_schema if PRAGMA failed
+                    if columns_data is None:
+                        try:
+                            result = connection.execute(f"""
+                                SELECT column_name, data_type, 
+                                       CASE WHEN is_nullable = 'NO' THEN 1 ELSE 0 END as is_pk
+                                FROM information_schema.columns 
+                                WHERE table_name = '{table_name}' AND table_schema = 'main'
+                                ORDER BY ordinal_position
+                            """).fetchall()
+                            if result:
+                                columns_data = [(row[0], row[1], row[2] == 1) for row in result]
+                        except Exception as e2:
+                            print(f"Information schema query failed for {table_name}: {e2}")
+                    
+                    # Approach 3: Try DESCRIBE as fallback
+                    if columns_data is None:
+                        try:
+                            result = connection.execute(f"DESCRIBE {table_name}").fetchall()
+                            if result:
+                                columns_data = [(row[0], row[1], False) for row in result]
+                        except Exception as e3:
+                            print(f"DESCRIBE failed for {table_name}: {e3}")
+                    
+                    # Process columns if we got any data
+                    if columns_data:
+                        for col_name, col_type, is_pk in columns_data:
+                            try:
+                                # Collect column name for auto-completion (avoid duplicates)
+                                if col_name not in self.column_names:
+                                    self.column_names.append(col_name)
+                                
+                                column_text = f"{col_name} ({col_type})"
+                                column_item = QTreeWidgetItem(table_item, [column_text])
+                                column_item.setIcon(0, self.pk_icon if is_pk else self.column_icon)
+                                # Store metadata for context menu
+                                column_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'column', 'name': col_name, 'table': table_name, 'is_pk': is_pk})
+                            except Exception as e:
+                                print(f"Error processing column {col_name} for table {table_name}: {e}")
+                                continue
+                    else:
+                        print(f"Could not load any column information for table {table_name}")
                         
-                        # Collect column name for auto-completion (avoid duplicates)
-                        if col_name not in self.column_names:
-                            self.column_names.append(col_name)
-                        
-                        column_text = f"{col_name} ({col_type})"
-                        column_item = QTreeWidgetItem(table_item, [column_text])
-                        column_item.setIcon(0, self.pk_icon if is_pk else self.column_icon)
-                        # Store metadata for context menu
-                        column_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'column', 'name': col_name, 'table': table_name, 'is_pk': is_pk})
                 except Exception as e:
                     print(f"Error loading columns for table {table_name}: {e}")
+                    # Continue processing other tables even if this one fails
         
         # Views group - DuckDB also supports views
         try:
@@ -3705,9 +3846,120 @@ class SQLEditorApp(QMainWindow):
             print(f"Auto-connect error: {e}")
     
     def refresh_schema_browser(self):
-        """Refresh the schema browser immediately"""
-        if self.current_connection and self.current_connection_info:
-            self.schema_browser.load_schema(self.current_connection, self.current_connection_info)
+        """Refresh the schema browser with comprehensive connection validation and recovery"""
+        if not self.current_connection_info:
+            print("No connection info available for schema refresh")
+            return
+            
+        max_attempts = 3
+        attempt = 0
+        
+        while attempt < max_attempts:
+            try:
+                # Validate current connection if it exists
+                if self.current_connection:
+                    try:
+                        # Test the connection with a simple query
+                        test_result = self.current_connection.execute("SELECT 1 AS test").fetchone()
+                        if test_result:
+                            # Connection is valid, proceed with schema loading
+                            self.schema_browser.load_schema(self.current_connection, self.current_connection_info)
+                            return
+                    except Exception as e:
+                        print(f"Current connection invalid (attempt {attempt + 1}): {e}")
+                
+                # Current connection is invalid, try to reconnect
+                print(f"Attempting to reconnect (attempt {attempt + 1})...")
+                if self.reconnect_current_database():
+                    # Reconnection successful, try to load schema
+                    self.schema_browser.load_schema(self.current_connection, self.current_connection_info)
+                    return
+                else:
+                    print(f"Reconnection failed on attempt {attempt + 1}")
+                
+            except Exception as e:
+                print(f"Schema refresh failed on attempt {attempt + 1}: {e}")
+            
+            attempt += 1
+            time.sleep(0.5)  # Brief delay between attempts
+        
+        # All attempts failed
+        print("All schema refresh attempts failed, clearing schema browser")
+        self.schema_browser.clear()
+        
+        # Show a user-friendly message
+        self.status_bar.showMessage("Connection lost - please reconnect to database", 5000)
+    
+    def reconnect_current_database(self):
+        """Reconnect to the current database with enhanced error handling and reference updates"""
+        if not self.current_connection_info:
+            print("No connection info available for reconnection")
+            return False
+        
+        try:
+            # Close existing connection safely
+            if self.current_connection:
+                try:
+                    self.current_connection.close()
+                except Exception as e:
+                    print(f"Error closing old connection (expected): {e}")
+                finally:
+                    self.current_connection = None
+            
+            # Extract connection details
+            db_type = self.current_connection_info["type"]
+            file_path = self.current_connection_info.get("file_path") or self.current_connection_info.get("path")
+            
+            if not file_path:
+                print("No database file path available for reconnection")
+                return False
+            
+            if not os.path.exists(file_path):
+                print(f"Database file does not exist: {file_path}")
+                return False
+            
+            # Create new connection based on database type
+            print(f"Reconnecting to {db_type} database: {file_path}")
+            
+            if db_type.lower() in ["sqlite", "sqlite3"]:
+                self.current_connection = sqlite3.connect(file_path)
+            elif db_type.lower() == "duckdb":
+                self.current_connection = duckdb.connect(file_path)
+            else:
+                print(f"Unsupported database type: {db_type}")
+                return False
+            
+            # Test the new connection
+            test_result = self.current_connection.execute("SELECT 1 AS test").fetchone()
+            if not test_result:
+                raise Exception("New connection test failed")
+            
+            # Update connection cache
+            connection_key = f"{db_type}:{file_path}"
+            self.connections[connection_key] = self.current_connection
+            
+            # Update all tabs with the new connection
+            for i in range(self.tab_widget.count()):
+                tab = self.tab_widget.widget(i)
+                if hasattr(tab, 'connection'):
+                    tab.connection = self.current_connection
+                if hasattr(tab, 'connection_info'):
+                    tab.connection_info = self.current_connection_info
+            
+            # Update window title
+            self.setWindowTitle(f"SQL Editor - {os.path.basename(file_path)}")
+            
+            # Update status
+            self.status_bar.showMessage(f"Successfully reconnected to {os.path.basename(file_path)}", 3000)
+            
+            print(f"Successfully reconnected to {file_path}")
+            return True
+            
+        except Exception as e:
+            print(f"Failed to reconnect to database: {e}")
+            self.current_connection = None
+            self.status_bar.showMessage(f"Reconnection failed: {str(e)}", 5000)
+            return False
             
     def update_all_tabs_completions(self, table_names, column_names):
         """Update auto-completion for all query tabs when schema changes"""
