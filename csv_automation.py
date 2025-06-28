@@ -837,7 +837,7 @@ class CSVAutomationWorker(QThread):
             logger.error(f"Error processing large Excel file {file_path}: {e}")
             raise ValueError(f"Failed to process large Excel file: {str(e)}")
     
-    def process_large_csv_chunked(self, file_path, output_file, source_file_name, chunk_size=50000):
+    def process_large_csv_chunked(self, file_path, output_file, source_file_name, chunk_size=500000):
         """Process large CSV files in chunks to prevent memory issues"""
         try:
             total_rows = 0
@@ -892,7 +892,7 @@ class CSVAutomationWorker(QThread):
         # Memory management settings
         LARGE_FILE_THRESHOLD_MB = 100  # Files larger than 100MB are processed in chunks
         MAX_MEMORY_USAGE_MB = 1000     # Maximum memory usage before switching to chunked processing
-        CHUNK_SIZE = 50000             # Rows per chunk for large files
+        CHUNK_SIZE = 500000            # Rows per chunk for large files (increased for better performance)
         
         try:
             file_type = source_config.get('file_type', 'csv')
