@@ -18,6 +18,7 @@ import json
 import re
 import warnings
 import time
+import glob
 
 # Suppress pandas warnings about DuckDB connections
 warnings.filterwarnings('ignore', message='pandas only supports SQLAlchemy connectable.*')
@@ -54,8 +55,7 @@ import qtawesome as qta
 
 # Bulk Excel import will be loaded dynamically when needed
 
-# Import CSV merger functionality
-from csv_merger import append_csv_files, get_csv_info
+# CSV merger functionality removed - no longer importing csv_merger
 
 # Import CSV automation functionality
 try:
@@ -63,6 +63,13 @@ try:
     CSV_AUTOMATION_AVAILABLE = True
 except ImportError:
     CSV_AUTOMATION_AVAILABLE = False
+
+# Import Polars for ultra-fast Excel processing
+try:
+    import polars as pl
+    POLARS_AVAILABLE = True
+except ImportError:
+    POLARS_AVAILABLE = False
 
 # Set application style
 QApplication.setStyle('Fusion')
@@ -1426,367 +1433,1145 @@ class LazyLoadingSettingsDialog(QDialog):
         self.accept()
 
 
-class CSVMergerDialog(QDialog):
-    """Dialog for merging multiple CSV files into a single file or database table"""
+
+
+class FolderImportDialog(QDialog):
+    """Dialog for importing entire folders of CSV or Excel files"""
     
     def __init__(self, parent=None, connection=None, connection_info=None):
         super().__init__(parent)
         self.connection = connection
         self.connection_info = connection_info
-        self.setWindowTitle("CSV Merger Tool")
+        window_title = "Folder Import Tool"
+        if POLARS_AVAILABLE:
+            window_title += " (⚡ Polars Enhanced)"
+        self.setWindowTitle(window_title)
         self.setModal(True)
-        self.resize(600, 500)
+        self.resize(700, 650)  # Slightly taller for new options
         self.init_ui()
         
     def init_ui(self):
         layout = QVBoxLayout()
         
         # Title
-        title = QLabel("Merge Multiple CSV Files")
+        title_text = "📁 Import Folder of Files"
+        if POLARS_AVAILABLE:
+            title_text += " ⚡"
+        title = QLabel(title_text)
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("color: #0078d4; margin-bottom: 15px;")
         layout.addWidget(title)
         
-        # Input folder selection
-        input_group = QGroupBox("Input Settings")
-        input_layout = QFormLayout()
+        # File type selection
+        type_group = QGroupBox("File Type")
+        type_layout = QVBoxLayout()
+        
+        self.file_type_combo = QComboBox()
+        self.file_type_combo.addItems([
+            "CSV Files (*.csv)",
+            "Excel Files (*.xlsx, *.xls)"
+        ])
+        self.file_type_combo.currentTextChanged.connect(self.on_file_type_changed)
+        type_layout.addWidget(self.file_type_combo)
+        
+        type_group.setLayout(type_layout)
+        layout.addWidget(type_group)
         
         # Folder selection
-        folder_layout = QHBoxLayout()
+        folder_group = QGroupBox("Folder Selection")
+        folder_layout = QVBoxLayout()
+        
+        # Folder path
+        folder_path_layout = QHBoxLayout()
         self.folder_path = QLineEdit()
-        self.folder_path.setPlaceholderText("Select folder containing CSV files...")
-        folder_browse_btn = QPushButton("Browse")
-        folder_browse_btn.clicked.connect(self.browse_folder)
-        folder_layout.addWidget(self.folder_path)
-        folder_layout.addWidget(folder_browse_btn)
-        input_layout.addRow("CSV Folder:", folder_layout)
+        self.folder_path.setPlaceholderText("Select folder containing files...")
+        self.folder_path.textChanged.connect(self.on_folder_changed)
+        
+        self.browse_folder_btn = QPushButton("Browse Folder")
+        self.browse_folder_btn.clicked.connect(self.browse_folder)
+        self.browse_folder_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0078d4;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #106ebe; }
+        """)
+        
+        folder_path_layout.addWidget(self.folder_path)
+        folder_path_layout.addWidget(self.browse_folder_btn)
+        folder_layout.addLayout(folder_path_layout)
         
         # File pattern
+        pattern_layout = QHBoxLayout()
+        pattern_layout.addWidget(QLabel("File Pattern:"))
         self.file_pattern = QLineEdit("*.csv")
-        self.file_pattern.setPlaceholderText("e.g., *.csv, data_*.csv")
-        input_layout.addRow("File Pattern:", self.file_pattern)
+        self.file_pattern.setPlaceholderText("e.g., *.csv, data_*.csv, sales_2024_*.xlsx")
+        self.file_pattern.textChanged.connect(self.on_pattern_changed)
+        pattern_layout.addWidget(self.file_pattern)
+        folder_layout.addLayout(pattern_layout)
         
-        # Preview button
-        self.preview_btn = QPushButton("Preview CSV Files")
-        self.preview_btn.clicked.connect(self.preview_files)
-        input_layout.addRow("", self.preview_btn)
+        # Scan button and file list
+        self.scan_btn = QPushButton("🔍 Scan Folder")
+        self.scan_btn.clicked.connect(self.scan_folder)
+        self.scan_btn.setEnabled(False)
+        folder_layout.addWidget(self.scan_btn)
         
         # File list
         self.file_list = QListWidget()
-        self.file_list.setMaximumHeight(150)
-        input_layout.addRow("Files Found:", self.file_list)
+        self.file_list.setMaximumHeight(120)
+        folder_layout.addWidget(QLabel("Files found:"))
+        folder_layout.addWidget(self.file_list)
         
-        input_group.setLayout(input_layout)
-        layout.addWidget(input_group)
+        folder_group.setLayout(folder_layout)
+        layout.addWidget(folder_group)
         
-        # Output settings
-        output_group = QGroupBox("Output Settings")
-        output_layout = QFormLayout()
+        # Import settings
+        import_group = QGroupBox("Import Settings")
+        import_layout = QVBoxLayout()
         
-        # Output destination
-        self.output_type = QComboBox()
-        self.output_type.addItems(["Save to File", "Import to Database"])
-        self.output_type.currentTextChanged.connect(self.update_output_ui)
-        output_layout.addRow("Output To:", self.output_type)
-        
-        # Output file selection
-        self.output_file_widget = QWidget()
-        file_layout = QHBoxLayout()
-        file_layout.setContentsMargins(0, 0, 0, 0)
-        self.output_file = QLineEdit()
-        self.output_file.setPlaceholderText("Select output CSV file...")
-        output_browse_btn = QPushButton("Browse")
-        output_browse_btn.clicked.connect(self.browse_output_file)
-        file_layout.addWidget(self.output_file)
-        file_layout.addWidget(output_browse_btn)
-        self.output_file_widget.setLayout(file_layout)
-        output_layout.addRow("Output File:", self.output_file_widget)
-        
-        # Database table name (initially hidden)
-        self.table_name_widget = QWidget()
+        # Table naming
         table_layout = QHBoxLayout()
-        table_layout.setContentsMargins(0, 0, 0, 0)
-        self.table_name = QLineEdit()
-        self.table_name.setPlaceholderText("Enter table name...")
-        table_layout.addWidget(self.table_name)
-        self.table_name_widget.setLayout(table_layout)
-        output_layout.addRow("Table Name:", self.table_name_widget)
-        self.table_name_widget.hide()
+        table_layout.addWidget(QLabel("Table Name Strategy:"))
         
-        # File mode
-        self.file_mode = QComboBox()
-        self.file_mode.addItems(["Create New", "Replace Existing", "Append to Existing"])
-        output_layout.addRow("Mode:", self.file_mode)
+        self.table_strategy = QComboBox()
+        self.table_strategy.addItems([
+            "Single Table (merge all files)",
+            "Multiple Tables (one per file)"
+        ])
+        self.table_strategy.currentTextChanged.connect(self.on_strategy_changed)
+        table_layout.addWidget(self.table_strategy)
+        import_layout.addLayout(table_layout)
         
-        output_group.setLayout(output_layout)
-        layout.addWidget(output_group)
+        # Single table name (shown when "Single Table" is selected)
+        self.single_table_widget = QWidget()
+        single_table_layout = QHBoxLayout()
+        single_table_layout.setContentsMargins(0, 0, 0, 0)
+        single_table_layout.addWidget(QLabel("Table Name:"))
+        self.single_table_name = QLineEdit()
+        self.single_table_name.setPlaceholderText("Enter table name for merged data...")
+        self.single_table_name.textChanged.connect(self.update_import_button)
+        single_table_layout.addWidget(self.single_table_name)
+        self.single_table_widget.setLayout(single_table_layout)
+        import_layout.addWidget(self.single_table_widget)
+        
+        # Table prefix (shown when "Multiple Tables" is selected)
+        self.multi_table_widget = QWidget()
+        multi_table_layout = QHBoxLayout()
+        multi_table_layout.setContentsMargins(0, 0, 0, 0)
+        multi_table_layout.addWidget(QLabel("Table Prefix:"))
+        self.table_prefix = QLineEdit()
+        self.table_prefix.setPlaceholderText("Optional prefix for table names...")
+        multi_table_layout.addWidget(self.table_prefix)
+        self.multi_table_widget.setLayout(multi_table_layout)
+        import_layout.addWidget(self.multi_table_widget)
+        self.multi_table_widget.hide()
+        
+        # Import mode
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("Import Mode:"))
+        self.import_mode = QComboBox()
+        self.import_mode.addItems(["Create New", "Replace Existing", "Append to Existing"])
+        mode_layout.addWidget(self.import_mode)
+        import_layout.addLayout(mode_layout)
+        
+        import_group.setLayout(import_layout)
+        layout.addWidget(import_group)
         
         # Advanced options
         advanced_group = QGroupBox("Advanced Options")
-        advanced_layout = QFormLayout()
+        advanced_layout = QVBoxLayout()
         
-        # Fill missing values
-        self.fill_missing = QLineEdit()
-        self.fill_missing.setPlaceholderText("Leave empty for NaN, or enter value like 'N/A'")
-        advanced_layout.addRow("Fill Missing Columns:", self.fill_missing)
+        # CSV-specific options
+        self.csv_options_widget = QWidget()
+        csv_options_layout = QHBoxLayout()
+        csv_options_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Encoding
-        self.encoding = QComboBox()
-        self.encoding.addItems(["utf-8", "cp1252", "iso-8859-1", "utf-16"])
-        advanced_layout.addRow("File Encoding:", self.encoding)
+        csv_options_layout.addWidget(QLabel("Encoding:"))
+        self.encoding_combo = QComboBox()
+        self.encoding_combo.addItems(["utf-8", "cp1252", "iso-8859-1", "utf-16"])
+        csv_options_layout.addWidget(self.encoding_combo)
+        
+        csv_options_layout.addWidget(QLabel("Delimiter:"))
+        self.delimiter_combo = QComboBox()
+        self.delimiter_combo.addItems(["Auto-detect", ",", ";", "\\t", "|"])
+        csv_options_layout.addWidget(self.delimiter_combo)
+        
+        self.csv_options_widget.setLayout(csv_options_layout)
+        advanced_layout.addWidget(self.csv_options_widget)
+        
+        # Excel-specific options
+        self.excel_options_widget = QWidget()
+        excel_options_layout = QVBoxLayout()
+        excel_options_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Sheet handling row
+        sheet_handling_layout = QHBoxLayout()
+        sheet_handling_layout.addWidget(QLabel("Sheet Mode:"))
+        self.sheet_handling = QComboBox()
+        self.sheet_handling.addItems(["First Sheet Only", "All Sheets", "Specific Sheet"])
+        self.sheet_handling.currentTextChanged.connect(self.on_sheet_mode_changed)
+        sheet_handling_layout.addWidget(self.sheet_handling)
+        excel_options_layout.addLayout(sheet_handling_layout)
+        
+        # Specific sheet selection row (initially hidden)
+        self.specific_sheet_widget = QWidget()
+        specific_sheet_layout = QHBoxLayout()
+        specific_sheet_layout.setContentsMargins(0, 0, 0, 0)
+        specific_sheet_layout.addWidget(QLabel("Sheet Name:"))
+        self.specific_sheet_combo = QComboBox()
+        self.specific_sheet_combo.setMinimumWidth(150)
+        specific_sheet_layout.addWidget(self.specific_sheet_combo)
+        
+        self.scan_sheets_btn = QPushButton("🔍 Scan Sheets")
+        self.scan_sheets_btn.clicked.connect(self.scan_excel_sheets)
+        self.scan_sheets_btn.setEnabled(False)
+        specific_sheet_layout.addWidget(self.scan_sheets_btn)
+        
+        self.specific_sheet_widget.setLayout(specific_sheet_layout)
+        excel_options_layout.addWidget(self.specific_sheet_widget)
+        self.specific_sheet_widget.hide()
+        
+        # Performance info
+        performance_label = QLabel("⚡ Using Polars for ultra-fast processing" if POLARS_AVAILABLE else "📊 Using Pandas for processing")
+        performance_label.setStyleSheet("font-size: 10px; color: #666; font-style: italic;")
+        excel_options_layout.addWidget(performance_label)
+        
+        self.excel_options_widget.setLayout(excel_options_layout)
+        advanced_layout.addWidget(self.excel_options_widget)
+        self.excel_options_widget.hide()
         
         advanced_group.setLayout(advanced_layout)
         layout.addWidget(advanced_group)
+        
+        # Progress bar (initially hidden)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.hide()
+        layout.addWidget(self.progress_bar)
         
         # Buttons
         button_layout = QHBoxLayout()
         button_layout.addStretch()
         
-        self.merge_btn = QPushButton("Merge CSV Files")
-        self.merge_btn.clicked.connect(self.merge_files)
-        self.merge_btn.setEnabled(False)
+        self.import_btn = QPushButton("🚀 Import Files")
+        self.import_btn.clicked.connect(self.start_import)
+        self.import_btn.setEnabled(False)
+        self.import_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover { background-color: #218838; }
+            QPushButton:disabled { background-color: #cccccc; }
+        """)
         
         cancel_btn = QPushButton("Cancel")
         cancel_btn.clicked.connect(self.reject)
         
-        button_layout.addWidget(self.merge_btn)
+        button_layout.addWidget(self.import_btn)
         button_layout.addWidget(cancel_btn)
         layout.addLayout(button_layout)
         
         self.setLayout(layout)
         
-    def browse_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select CSV Folder")
-        if folder:
-            self.folder_path.setText(folder)
-            self.preview_files()
-            
-    def browse_output_file(self):
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Merged CSV", "", "CSV Files (*.csv);;All Files (*)"
-        )
-        if file_path:
-            self.output_file.setText(file_path)
-            self.update_merge_button()
-            
-    def update_output_ui(self):
-        is_file_output = self.output_type.currentText() == "Save to File"
-        self.output_file_widget.setVisible(is_file_output)
-        self.table_name_widget.setVisible(not is_file_output)
+    def on_file_type_changed(self):
+        """Handle file type change"""
+        is_csv = "CSV" in self.file_type_combo.currentText()
         
-        if not is_file_output and not self.connection:
-            QMessageBox.warning(self, "No Database Connection", 
-                              "Please connect to a database first to import merged data.")
-            self.output_type.setCurrentText("Save to File")
+        if is_csv:
+            self.file_pattern.setText("*.csv")
+            self.csv_options_widget.show()
+            self.excel_options_widget.hide()
+        else:
+            self.file_pattern.setText("*.xlsx")
+            self.csv_options_widget.hide()
+            self.excel_options_widget.show()
+            # Update scan sheets button state
+            self.update_scan_sheets_button()
             
-        self.update_merge_button()
+        self.scan_folder()
         
-    def preview_files(self):
+    def on_folder_changed(self):
+        """Handle folder path change"""
+        folder_exists = bool(self.folder_path.text().strip() and 
+                           os.path.exists(self.folder_path.text().strip()))
+        self.scan_btn.setEnabled(folder_exists)
+        
+        if folder_exists:
+            # Auto-suggest table name
+            folder_name = os.path.basename(self.folder_path.text().strip())
+            if not self.single_table_name.text():
+                self.single_table_name.setText(f"{folder_name}_data")
+                
+        self.update_import_button()
+        self.update_scan_sheets_button()
+        
+    def on_pattern_changed(self):
+        """Handle pattern change"""
+        if self.folder_path.text().strip() and os.path.exists(self.folder_path.text().strip()):
+            self.scan_folder()
+            
+    def on_strategy_changed(self):
+        """Handle table strategy change"""
+        is_single = "Single Table" in self.table_strategy.currentText()
+        self.single_table_widget.setVisible(is_single)
+        self.multi_table_widget.setVisible(not is_single)
+        self.update_import_button()
+        
+    def on_sheet_mode_changed(self):
+        """Handle sheet mode change for Excel files"""
+        is_specific = "Specific Sheet" in self.sheet_handling.currentText()
+        self.specific_sheet_widget.setVisible(is_specific)
+        self.update_scan_sheets_button()
+        
+    def update_scan_sheets_button(self):
+        """Update scan sheets button state"""
+        folder_exists = bool(self.folder_path.text().strip() and 
+                           os.path.exists(self.folder_path.text().strip()))
+        is_excel = "Excel" in self.file_type_combo.currentText()
+        is_specific = "Specific Sheet" in self.sheet_handling.currentText()
+        
+        self.scan_sheets_btn.setEnabled(folder_exists and is_excel and is_specific)
+        
+    def scan_excel_sheets(self):
+        """Scan Excel files in folder to get available sheet names"""
         folder = self.folder_path.text().strip()
-        pattern = self.file_pattern.text().strip() or "*.csv"
+        pattern = self.file_pattern.text().strip()
         
-        if not folder or not os.path.exists(folder):
-            self.file_list.clear()
-            self.merge_btn.setEnabled(False)
+        if not folder or not os.path.exists(folder) or not pattern:
             return
             
         try:
-            # Get CSV file info
-            csv_info = get_csv_info(folder, pattern)
+            # Get Excel files
+            file_pattern = os.path.join(folder, pattern)
+            files = glob.glob(file_pattern)
+            
+            if pattern == "*.xlsx":
+                files.extend(glob.glob(os.path.join(folder, "*.xls")))
+                
+            if not files:
+                QMessageBox.warning(self, "No Files", "No Excel files found to scan.")
+                return
+                
+            # Collect all unique sheet names
+            all_sheets = set()
+            
+            for file_path in files[:5]:  # Limit to first 5 files for performance
+                try:
+                    if POLARS_AVAILABLE:
+                        # Use Polars to get sheet names (faster)
+                        try:
+                            # Polars doesn't have a direct way to list sheets, so we use pandas for this
+                            excel_file = pd.ExcelFile(file_path)
+                            sheets = excel_file.sheet_names
+                        except:
+                            # Fallback to pandas
+                            excel_file = pd.ExcelFile(file_path)
+                            sheets = excel_file.sheet_names
+                    else:
+                        # Use pandas
+                        excel_file = pd.ExcelFile(file_path)
+                        sheets = excel_file.sheet_names
+                        
+                    all_sheets.update(sheets)
+                    
+                except Exception as e:
+                    continue  # Skip files that can't be read
+                    
+            if all_sheets:
+                # Sort sheets and update combo box
+                sorted_sheets = sorted(list(all_sheets))
+                self.specific_sheet_combo.clear()
+                self.specific_sheet_combo.addItems(sorted_sheets)
+                
+                QMessageBox.information(self, "Sheets Found", 
+                    f"Found {len(sorted_sheets)} unique sheet names across {len(files)} Excel files:\n\n" + 
+                    ", ".join(sorted_sheets[:10]) + ("..." if len(sorted_sheets) > 10 else ""))
+            else:
+                QMessageBox.warning(self, "No Sheets", "No readable sheet names found in Excel files.")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error scanning Excel sheets: {str(e)}")
+        
+    def browse_folder(self):
+        """Browse for folder"""
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder")
+        if folder:
+            self.folder_path.setText(folder)
+            
+    def scan_folder(self):
+        """Scan folder for files matching pattern"""
+        folder = self.folder_path.text().strip()
+        pattern = self.file_pattern.text().strip()
+        
+        if not folder or not os.path.exists(folder) or not pattern:
+            self.file_list.clear()
+            self.update_import_button()
+            return
+            
+        try:
+            file_pattern = os.path.join(folder, pattern)
+            files = glob.glob(file_pattern)
+            
+            # For Excel, also check .xls files if pattern is *.xlsx
+            if "Excel" in self.file_type_combo.currentText() and pattern == "*.xlsx":
+                xls_pattern = os.path.join(folder, "*.xls")
+                files.extend(glob.glob(xls_pattern))
+                
+            files = sorted([os.path.basename(f) for f in files])
             
             self.file_list.clear()
-            if csv_info:
-                for info in csv_info:
-                    item_text = f"{info['filename']} ({info['column_count']} columns)"
-                    self.file_list.addItem(item_text)
-                    
-                # Auto-suggest table name if database output
-                if self.output_type.currentText() == "Import to Database" and not self.table_name.text():
-                    folder_name = os.path.basename(folder)
-                    suggested_name = f"merged_{folder_name}_data"
-                    self.table_name.setText(suggested_name)
-                    
+            if files:
+                for file in files:
+                    self.file_list.addItem(f"📄 {file}")
             else:
-                self.file_list.addItem("No CSV files found")
+                self.file_list.addItem("No files found matching pattern")
                 
-            self.update_merge_button()
+            self.update_import_button()
             
         except Exception as e:
-            QMessageBox.warning(self, "Error", f"Error previewing files: {str(e)}")
+            QMessageBox.warning(self, "Error", f"Error scanning folder: {str(e)}")
             
-    def update_merge_button(self):
-        folder_ok = bool(self.folder_path.text().strip() and os.path.exists(self.folder_path.text().strip()))
-        files_ok = self.file_list.count() > 0 and self.file_list.item(0).text() != "No CSV files found"
+    def update_import_button(self):
+        """Update import button state"""
+        folder_ok = bool(self.folder_path.text().strip() and 
+                        os.path.exists(self.folder_path.text().strip()))
+        files_ok = (self.file_list.count() > 0 and 
+                   self.file_list.item(0).text() != "No files found matching pattern")
         
-        if self.output_type.currentText() == "Save to File":
-            output_ok = bool(self.output_file.text().strip())
+        if "Single Table" in self.table_strategy.currentText():
+            table_ok = bool(self.single_table_name.text().strip())
         else:
-            output_ok = bool(self.table_name.text().strip() and self.connection)
+            table_ok = True  # Multiple tables always OK
             
-        self.merge_btn.setEnabled(folder_ok and files_ok and output_ok)
+        self.import_btn.setEnabled(folder_ok and files_ok and table_ok and 
+                                 bool(self.connection))
         
-    def merge_files(self):
+    def start_import(self):
+        """Start the import process"""
         try:
             folder = self.folder_path.text().strip()
-            pattern = self.file_pattern.text().strip() or "*.csv"
-            fill_value = self.fill_missing.text().strip() or None
-            encoding = self.encoding.currentText()
+            pattern = self.file_pattern.text().strip()
+            is_csv = "CSV" in self.file_type_combo.currentText()
+            is_single_table = "Single Table" in self.table_strategy.currentText()
             
-            # Determine mode
+            # Get file list
+            file_pattern = os.path.join(folder, pattern)
+            files = glob.glob(file_pattern)
+            
+            if "Excel" in self.file_type_combo.currentText() and pattern == "*.xlsx":
+                files.extend(glob.glob(os.path.join(folder, "*.xls")))
+                
+            if not files:
+                QMessageBox.warning(self, "No Files", "No files found to import.")
+                return
+                
+            # Show progress
+            self.progress_bar.show()
+            self.progress_bar.setRange(0, len(files))
+            self.progress_bar.setValue(0)
+            self.import_btn.setEnabled(False)
+            
+            # Start import
+            self.import_files(folder, files, is_csv, is_single_table)
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error starting import: {str(e)}")
+            
+    def import_files(self, folder, files, is_csv, is_single_table):
+        """Import the files"""
+        try:
             mode_map = {
                 "Create New": "create_new",
-                "Replace Existing": "replace", 
+                "Replace Existing": "replace",
                 "Append to Existing": "append"
             }
-            mode = mode_map[self.file_mode.currentText()]
+            mode = mode_map[self.import_mode.currentText()]
             
-            if self.output_type.currentText() == "Save to File":
-                # Merge to file
-                output_file = self.output_file.text().strip()
-                
-                # Show progress dialog
-                progress = QProgressDialog("Merging CSV files...", "Cancel", 0, 0, self)
-                progress.setWindowModality(Qt.WindowModality.WindowModal)
-                progress.show()
-                QApplication.processEvents()
-                
-                # Perform merge
-                df = append_csv_files(
-                    folder, output_file, mode=mode, fill_missing=fill_value,
-                    encoding=encoding, file_pattern=pattern
-                )
-                
-                progress.close()
-                
-                QMessageBox.information(self, "Success", 
-                    f"Successfully merged {len(df)} rows into {output_file}")
-                
-            else:
-                # Merge to database
-                table_name = self.table_name.text().strip()
-                
-                # Create temporary output file
-                import tempfile
-                with tempfile.NamedTemporaryFile(suffix='.csv', delete=False) as tmp:
-                    temp_file = tmp.name
-                
+            successful_imports = 0
+            failed_imports = []
+            all_dataframes = []
+            main_app = self.parent()
+            
+            # Validate database connection first
+            if not main_app.current_connection:
+                QMessageBox.critical(self, "No Database", "No database connection available.")
+                return
+            
+            for i, file_path in enumerate(files):
                 try:
-                    # Show progress dialog
-                    progress = QProgressDialog("Merging CSV files...", "Cancel", 0, 0, self)
-                    progress.setWindowModality(Qt.WindowModality.WindowModal)
-                    progress.show()
-                    QApplication.processEvents()
+                    # Update progress with file size info
+                    file_size = os.path.getsize(file_path)
+                    file_size_mb = file_size / (1024 * 1024)
                     
-                    # Merge to temporary file
-                    df = append_csv_files(
-                        folder, temp_file, mode="replace", fill_missing=fill_value,
-                        encoding=encoding, file_pattern=pattern
-                    )
-                    
-                    # Import to database directly using pandas
-                    progress.setLabelText("Importing to database...")
-                    QApplication.processEvents()
-                    
-                    main_app = self.parent()
-                    success = False
-                    error_msg = ""
-                    
-                    try:
-                        # Import directly using the merged DataFrame
-                        if main_app.current_connection and main_app.current_connection_info:
-                            db_type = main_app.current_connection_info.get('type', '').lower()
-                            
-                            if db_type == 'duckdb':
-                                # DuckDB import
-                                if mode in ['create_new', 'replace']:
-                                    # Drop table if exists for create new or replace mode
-                                    try:
-                                        main_app.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
-                                    except:
-                                        pass
-                                
-                                # Use DuckDB's register and create table functionality
-                                main_app.current_connection.register('temp_df', df)
-                                if mode == 'append':
-                                    # For append mode, check if table exists first
-                                    try:
-                                        # Try to get table info to see if it exists
-                                        main_app.current_connection.execute(f"SELECT * FROM {table_name} LIMIT 0")
-                                        # Table exists, insert data
-                                        main_app.current_connection.execute(f"INSERT INTO {table_name} SELECT * FROM temp_df")
-                                    except:
-                                        # Table doesn't exist, create it
-                                        main_app.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM temp_df")
-                                else:
-                                    # For create_new and replace modes, create table (will create new if doesn't exist)
-                                    main_app.current_connection.execute(f"CREATE TABLE {table_name} AS SELECT * FROM temp_df")
-                                main_app.current_connection.unregister('temp_df')
-                                success = True
-                                
-                            elif db_type == 'sqlite':
-                                # SQLite import
-                                if mode in ['create_new', 'replace']:
-                                    # Drop table if exists for create new or replace mode
-                                    try:
-                                        main_app.current_connection.execute(f"DROP TABLE IF EXISTS {table_name}")
-                                    except:
-                                        pass
-                                
-                                # Use pandas to_sql method
-                                if mode == 'append':
-                                    # For append mode, use 'append' if table exists, 'replace' if it doesn't
-                                    try:
-                                        # Check if table exists by querying it
-                                        cursor = main_app.current_connection.cursor()
-                                        cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
-                                        table_exists = cursor.fetchone() is not None
-                                        cursor.close()
-                                        
-                                        if table_exists:
-                                            df.to_sql(table_name, main_app.current_connection, if_exists='append', index=False)
-                                        else:
-                                            # Table doesn't exist, create it
-                                            df.to_sql(table_name, main_app.current_connection, if_exists='replace', index=False)
-                                    except Exception as e:
-                                        # If anything fails, try replace mode (will create if doesn't exist)
-                                        df.to_sql(table_name, main_app.current_connection, if_exists='replace', index=False)
-                                else:
-                                    # For create_new and replace modes, use replace (will create if doesn't exist)
-                                    df.to_sql(table_name, main_app.current_connection, if_exists='replace', index=False)
-                                success = True
-                                
-                        if not success:
-                            error_msg = "Unable to determine database type or no connection available"
-                            
-                    except Exception as e:
-                        error_msg = str(e)
-                        success = False
-                    
-                    progress.close()
-                    
-                    if success:
-                        QMessageBox.information(self, "Success", 
-                            f"Successfully merged and imported {len(df)} rows into table '{table_name}'")
-                            
-                        # Signal schema change
-                        if hasattr(main_app, 'refresh_schema_browser'):
-                            main_app.refresh_schema_browser()
-                            main_app.check_schema_changes()
+                    if file_size_mb < 1:
+                        size_str = f"{file_size / 1024:.1f} KB"
                     else:
-                        QMessageBox.critical(self, "Import Error", 
-                            f"Failed to import to database: {error_msg}")
+                        size_str = f"{file_size_mb:.1f} MB"
+                    
+                    self.progress_bar.setValue(i)
+                    self.progress_bar.setFormat(f"Processing {os.path.basename(file_path)} ({size_str}) - {i+1}/{len(files)}")
+                    QApplication.processEvents()
+                    
+                    # Read file
+                    if is_csv:
+                        # CSV import with optimized processing (with chunking for large files)
+                        df = self.read_csv_optimized(file_path, f"Processing {os.path.basename(file_path)} ({size_str})")
+                    else:
+                        # Excel import using ultra-fast Polars when available
+                        df = self.read_excel_optimized(file_path)
+                    
+                    if df.empty:
+                        failed_imports.append(f"{os.path.basename(file_path)}: Empty file")
+                        continue
                         
-                finally:
-                    # Clean up temporary file
+                    # Clean column names
+                    df.columns = [self.clean_column_name(col) for col in df.columns]
+                    
+                    if is_single_table:
+                        # Add source file column
+                        df['_source_file'] = os.path.basename(file_path)
+                        all_dataframes.append(df)
+                    else:
+                        # Import each file to separate table
+                        base_name = os.path.splitext(os.path.basename(file_path))[0]
+                        table_prefix = self.table_prefix.text().strip()
+                        table_name = f"{table_prefix}{base_name}" if table_prefix else base_name
+                        table_name = self.clean_table_name(table_name)
+                        
+                        # Validate table name
+                        if not table_name or table_name.strip() == "":
+                            failed_imports.append(f"{os.path.basename(file_path)}: Invalid table name")
+                            continue
+                        
+                        # Import to database with better error handling
+                        try:
+                            success = self.safe_database_import(df, table_name, mode, main_app)
+                            if success:
+                                successful_imports += 1
+                            else:
+                                failed_imports.append(f"{os.path.basename(file_path)}: Database import failed")
+                        except Exception as import_error:
+                            failed_imports.append(f"{os.path.basename(file_path)}: {str(import_error)}")
+                            
+                except Exception as e:
+                    failed_imports.append(f"{os.path.basename(file_path)}: {str(e)}")
+                    
+            # Handle single table import
+            if is_single_table and all_dataframes:
+                try:
+                    # Combine all dataframes with proper alignment
+                    combined_df = self.combine_dataframes_safely(all_dataframes)
+                    table_name = self.single_table_name.text().strip()
+                    
+                    # Validate table name
+                    if not table_name or table_name.strip() == "":
+                        failed_imports.append("Combined table: Invalid table name")
+                    else:
+                        # Import to database with better error handling
+                        try:
+                            success = self.safe_database_import(combined_df, table_name, mode, main_app)
+                            if success:
+                                successful_imports = 1
+                            else:
+                                failed_imports.append(f"Combined table '{table_name}': Database import failed")
+                        except Exception as import_error:
+                            failed_imports.append(f"Combined table '{table_name}': {str(import_error)}")
+                        
+                except Exception as e:
+                    failed_imports.append(f"Combined table: {str(e)}")
+                    
+            # Update progress
+            self.progress_bar.setValue(len(files))
+            
+            # Show results with performance info
+            if successful_imports > 0:
+                # Calculate total processing stats
+                total_files = len(files)
+                total_size = sum(os.path.getsize(f) for f in files if os.path.exists(f))
+                total_size_mb = total_size / (1024 * 1024)
+                
+                message = f"Successfully imported {successful_imports} "
+                if is_single_table:
+                    message += f"files into table '{self.single_table_name.text()}'"
+                else:
+                    message += "tables"
+                    
+                # Add performance stats
+                if total_size_mb > 0:
+                    message += f"\n\n📊 Processing Stats:"
+                    message += f"\n• Total Files: {total_files}"
+                    if total_size_mb < 1:
+                        message += f"\n• Total Size: {total_size / 1024:.1f} KB"
+                    else:
+                        message += f"\n• Total Size: {total_size_mb:.1f} MB"
+                    
+                    if POLARS_AVAILABLE and not is_csv:
+                        message += f"\n⚡ Enhanced with Polars for ultra-fast processing"
+                    elif is_csv:
+                        if total_size_mb > 50:
+                            message += f"\n⚡ Used chunked processing for large CSV files"
+                        else:
+                            message += f"\n⚡ Used optimized CSV processing"
+                    
+                if failed_imports:
+                    message += f"\n\n❌ Failed imports ({len(failed_imports)}):\n"
+                    message += "\n".join(failed_imports[:10])  # Limit to first 10 errors
+                    if len(failed_imports) > 10:
+                        message += f"\n... and {len(failed_imports) - 10} more errors"
+                    
+                QMessageBox.information(self, "Import Complete", message)
+                
+                # Refresh schema browser
+                if hasattr(main_app, 'refresh_schema_browser'):
+                    main_app.refresh_schema_browser()
+                    main_app.check_schema_changes()
+                    
+                self.accept()
+            else:
+                error_message = "No files were imported successfully."
+                if failed_imports:
+                    error_message += "\n\nErrors:\n" + "\n".join(failed_imports[:10])
+                    if len(failed_imports) > 10:
+                        error_message += f"\n... and {len(failed_imports) - 10} more errors"
+                QMessageBox.critical(self, "Import Failed", error_message)
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", f"Critical error during import: {str(e)}")
+        finally:
+            self.progress_bar.hide()
+            self.import_btn.setEnabled(True)
+            
+    def combine_dataframes_safely(self, dataframes):
+        """Safely combine dataframes with proper column alignment"""
+        if not dataframes:
+            return pd.DataFrame()
+            
+        if len(dataframes) == 1:
+            return dataframes[0]
+            
+        try:
+            # Get all unique columns
+            all_columns = set()
+            for df in dataframes:
+                all_columns.update(df.columns)
+            all_columns = sorted(list(all_columns))
+            
+            # Align all dataframes to have the same columns
+            aligned_dfs = []
+            for df in dataframes:
+                aligned_df = df.copy()
+                
+                # Add missing columns with NaN
+                for col in all_columns:
+                    if col not in aligned_df.columns:
+                        aligned_df[col] = pd.NA
+                        
+                # Reorder columns
+                aligned_df = aligned_df.reindex(columns=all_columns)
+                aligned_dfs.append(aligned_df)
+                
+            # Combine all dataframes
+            return pd.concat(aligned_dfs, ignore_index=True)
+            
+        except Exception as e:
+            # Fallback to simple concatenation
+            return pd.concat(dataframes, ignore_index=True, sort=False)
+            
+    def safe_database_import(self, df, table_name, mode, main_app):
+        """Safely import dataframe to database with proper error handling"""
+        try:
+            # Validate inputs
+            if df is None or df.empty:
+                raise ValueError("DataFrame is empty")
+                
+            if not table_name or table_name.strip() == "":
+                raise ValueError("Table name is empty")
+                
+            if not main_app.current_connection:
+                raise ValueError("No database connection")
+            
+            # Clean table name
+            table_name = self.clean_table_name(table_name)
+            
+            # Get database type
+            db_type = main_app.current_connection_info.get('type', '').lower()
+            
+            # Handle different import modes
+            if mode == 'create_new':
+                # For create new, check if table exists first
+                if self.table_exists(table_name, main_app):
+                    raise ValueError(f"Table '{table_name}' already exists. Use 'Replace' or 'Append' mode instead.")
+                    
+            elif mode == 'replace':
+                # For replace, drop table if it exists
+                try:
+                    self.drop_table_if_exists(table_name, main_app)
+                except:
+                    pass  # Ignore errors if table doesn't exist
+                    
+            elif mode == 'append':
+                # For append, table should exist
+                if not self.table_exists(table_name, main_app):
+                    # Table doesn't exist, create it instead
+                    mode = 'create_new'
+            
+            # Import the dataframe
+            if db_type == 'duckdb':
+                return self.import_to_duckdb(df, table_name, mode, main_app)
+            elif db_type == 'sqlite':
+                return self.import_to_sqlite(df, table_name, mode, main_app)
+            else:
+                raise ValueError(f"Unsupported database type: {db_type}")
+                
+        except Exception as e:
+            print(f"Database import error: {str(e)}")  # Debug logging
+            raise e
+            
+    def table_exists(self, table_name, main_app):
+        """Check if table exists in database"""
+        try:
+            db_type = main_app.current_connection_info.get('type', '').lower()
+            
+            if db_type == 'duckdb':
+                result = main_app.current_connection.execute(f"""
+                    SELECT COUNT(*) FROM information_schema.tables 
+                    WHERE table_name = '{table_name}' AND table_schema = 'main'
+                """).fetchone()
+                return result[0] > 0
+            elif db_type == 'sqlite':
+                cursor = main_app.current_connection.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+                result = cursor.fetchone()
+                cursor.close()
+                return result is not None
+            else:
+                return False
+        except:
+            return False
+            
+    def drop_table_if_exists(self, table_name, main_app):
+        """Drop table if it exists"""
+        try:
+            db_type = main_app.current_connection_info.get('type', '').lower()
+            
+            if db_type == 'duckdb':
+                main_app.current_connection.execute(f"DROP TABLE IF EXISTS \"{table_name}\"")
+            elif db_type == 'sqlite':
+                main_app.current_connection.execute(f"DROP TABLE IF EXISTS \"{table_name}\"")
+                main_app.current_connection.commit()
+        except Exception as e:
+            print(f"Error dropping table {table_name}: {str(e)}")
+            
+    def import_to_duckdb(self, df, table_name, mode, main_app):
+        """Import DataFrame to DuckDB"""
+        try:
+            # Register the DataFrame with DuckDB
+            main_app.current_connection.register('temp_import_df', df)
+            
+            if mode == 'append' and self.table_exists(table_name, main_app):
+                # Append to existing table
+                main_app.current_connection.execute(f'INSERT INTO "{table_name}" SELECT * FROM temp_import_df')
+            else:
+                # Create new table
+                main_app.current_connection.execute(f'CREATE TABLE "{table_name}" AS SELECT * FROM temp_import_df')
+            
+            # Unregister the temporary DataFrame
+            main_app.current_connection.unregister('temp_import_df')
+            return True
+            
+        except Exception as e:
+            # Clean up temporary DataFrame
+            try:
+                main_app.current_connection.unregister('temp_import_df')
+            except:
+                pass
+            raise e
+            
+    def import_to_sqlite(self, df, table_name, mode, main_app):
+        """Import DataFrame to SQLite"""
+        try:
+            if mode == 'append':
+                if_exists = 'append'
+            else:
+                if_exists = 'replace'
+                
+            df.to_sql(table_name, main_app.current_connection, if_exists=if_exists, index=False)
+            main_app.current_connection.commit()
+            return True
+            
+        except Exception as e:
+            main_app.current_connection.rollback()
+            raise e
+            
+    def clean_column_name(self, name):
+        """Clean column name for SQL compatibility"""
+        import re
+        name = str(name).strip()
+        name = re.sub(r'[^\w\s]', '_', name)
+        name = re.sub(r'\s+', '_', name)  
+        name = re.sub(r'_+', '_', name)
+        name = name.strip('_')
+        
+        if name and name[0].isdigit():
+            name = f"col_{name}"
+            
+        return name or "unnamed_column"
+        
+    def clean_table_name(self, name):
+        """Clean table name for SQL compatibility"""
+        import re
+        name = str(name).strip()
+        name = re.sub(r'[^\w]', '_', name)
+        name = re.sub(r'_+', '_', name)
+        name = name.strip('_')
+        
+        if name and name[0].isdigit():
+            name = f"table_{name}"
+            
+        return name or "imported_table"
+        
+    def read_excel_optimized(self, file_path):
+        """Read Excel file using ultra-fast Polars or fallback to pandas"""
+        sheet_handling = self.sheet_handling.currentText()
+        
+        try:
+            if POLARS_AVAILABLE:
+                # Use Polars for maximum speed
+                try:
+                    if sheet_handling == 'All Sheets':
+                        # Read all sheets and combine
+                        excel_file = pd.ExcelFile(file_path)  # Still need pandas to get sheet names
+                        sheet_dfs = []
+                        for sheet_name in excel_file.sheet_names:
+                            try:
+                                df_pl = pl.read_excel(file_path, sheet_name=sheet_name)
+                                df = df_pl.to_pandas()
+                                df['_sheet_name'] = sheet_name
+                                sheet_dfs.append(df)
+                            except:
+                                # Fallback to pandas for this sheet
+                                df = pd.read_excel(file_path, sheet_name=sheet_name)
+                                df['_sheet_name'] = sheet_name
+                                sheet_dfs.append(df)
+                        
+                        if sheet_dfs:
+                            df = pd.concat(sheet_dfs, ignore_index=True)
+                        else:
+                            raise Exception("No readable sheets found")
+                            
+                    elif sheet_handling == 'Specific Sheet':
+                        # Read specific sheet
+                        sheet_name = self.specific_sheet_combo.currentText()
+                        if sheet_name:
+                            try:
+                                df_pl = pl.read_excel(file_path, sheet_name=sheet_name)
+                                df = df_pl.to_pandas()
+                            except:
+                                # Fallback to pandas
+                                df = pd.read_excel(file_path, sheet_name=sheet_name)
+                        else:
+                            # No sheet selected, use first sheet
+                            df_pl = pl.read_excel(file_path)
+                            df = df_pl.to_pandas()
+                    else:
+                        # First sheet only
+                        df_pl = pl.read_excel(file_path)
+                        df = df_pl.to_pandas()
+                        
+                except Exception as polars_error:
+                    # Fallback to pandas if Polars fails
+                    df = self._read_excel_pandas_fallback(file_path, sheet_handling)
+                    
+            else:
+                # Use pandas directly
+                df = self._read_excel_pandas_fallback(file_path, sheet_handling)
+                
+            # Clean column names for SQL compatibility
+            df.columns = [self.clean_column_name(col) for col in df.columns]
+            return df
+            
+        except Exception as e:
+            raise Exception(f"Failed to read Excel file {os.path.basename(file_path)}: {str(e)}")
+            
+    def _read_excel_pandas_fallback(self, file_path, sheet_handling):
+        """Fallback Excel reading using pandas"""
+        if sheet_handling == 'All Sheets':
+            # Read all sheets and combine
+            excel_file = pd.ExcelFile(file_path)
+            sheet_dfs = []
+            for sheet_name in excel_file.sheet_names:
+                sheet_df = pd.read_excel(file_path, sheet_name=sheet_name)
+                sheet_df['_sheet_name'] = sheet_name
+                sheet_dfs.append(sheet_df)
+            
+            if sheet_dfs:
+                return pd.concat(sheet_dfs, ignore_index=True)
+            else:
+                raise Exception("No readable sheets found")
+                
+        elif sheet_handling == 'Specific Sheet':
+            # Read specific sheet
+            sheet_name = self.specific_sheet_combo.currentText()
+            if sheet_name:
+                return pd.read_excel(file_path, sheet_name=sheet_name)
+            else:
+                # No sheet selected, use first sheet
+                return pd.read_excel(file_path)
+        else:
+            # First sheet only
+            return pd.read_excel(file_path)
+            
+    def read_csv_optimized(self, file_path, status_message="Processing CSV"):
+        """Read CSV file with optimized chunking and memory management like automation"""
+        try:
+            # Get CSV options
+            encoding = self.encoding_combo.currentText()
+            delimiter = self.delimiter_combo.currentText()
+            
+            if delimiter == 'Auto-detect':
+                delimiter = self.detect_csv_delimiter_fast(file_path)
+            elif delimiter == '\\t':
+                delimiter = '\t'
+                
+            # Get file size for optimization decisions
+            file_size = os.path.getsize(file_path)
+            file_size_mb = file_size / (1024 * 1024)
+            
+            # Determine processing strategy based on file size
+            if file_size_mb < 50:  # Small files - read directly
+                return self.read_csv_direct(file_path, encoding, delimiter)
+            elif file_size_mb < 500:  # Medium files - optimized reading
+                return self.read_csv_optimized_medium(file_path, encoding, delimiter, status_message)
+            else:  # Large files - chunked processing
+                return self.read_csv_chunked(file_path, encoding, delimiter, status_message)
+                
+        except Exception as e:
+            raise Exception(f"Failed to read CSV file {os.path.basename(file_path)}: {str(e)}")
+            
+    def detect_csv_delimiter_fast(self, file_path):
+        """Fast CSV delimiter detection using sample"""
+        try:
+            # Read first few lines for delimiter detection
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                sample = f.read(8192)  # Read first 8KB
+                
+            # Try common delimiters
+            delimiters = [',', ';', '\t', '|']
+            delimiter_scores = {}
+            
+            for delimiter in delimiters:
+                lines = sample.split('\n')[:10]  # Check first 10 lines
+                if len(lines) > 1:
+                    counts = [line.count(delimiter) for line in lines if line.strip()]
+                    if counts and len(set(counts)) == 1 and counts[0] > 0:
+                        delimiter_scores[delimiter] = counts[0]
+                        
+            if delimiter_scores:
+                return max(delimiter_scores.items(), key=lambda x: x[1])[0]
+            else:
+                return ','  # Default fallback
+                
+        except:
+            return ','  # Default fallback
+            
+    def read_csv_direct(self, file_path, encoding, delimiter):
+        """Direct CSV reading for small files"""
+        return pd.read_csv(
+            file_path,
+            encoding=encoding,
+            sep=delimiter,
+            low_memory=False,
+            engine='c'  # Use C engine for speed
+        )
+        
+    def read_csv_optimized_medium(self, file_path, encoding, delimiter, status_message):
+        """Optimized CSV reading for medium files"""
+        try:
+            # Use optimized pandas parameters
+            df = pd.read_csv(
+                file_path,
+                encoding=encoding,
+                sep=delimiter,
+                low_memory=False,
+                engine='c',  # C engine is faster
+                dtype_backend='numpy_nullable',  # Use nullable dtypes
+                na_filter=True,
+                skip_blank_lines=True
+            )
+            
+            # Optimize data types
+            df = self.optimize_dataframe_dtypes(df)
+            return df
+            
+        except Exception as e:
+            # Fallback to basic reading
+            return pd.read_csv(file_path, encoding=encoding, sep=delimiter)
+            
+    def read_csv_chunked(self, file_path, encoding, delimiter, status_message):
+        """Chunked CSV reading for large files with progress reporting"""
+        try:
+            # Determine optimal chunk size based on available memory
+            chunk_size = self.calculate_optimal_chunk_size(file_path)
+            
+            # Read CSV in chunks
+            chunks = []
+            total_rows = 0
+            chunk_count = 0
+            
+            csv_reader = pd.read_csv(
+                file_path,
+                encoding=encoding,
+                sep=delimiter,
+                chunksize=chunk_size,
+                low_memory=False,
+                engine='c',
+                dtype_backend='numpy_nullable'
+            )
+            
+            for chunk in csv_reader:
+                try:
+                    # Optimize chunk data types
+                    chunk = self.optimize_dataframe_dtypes(chunk)
+                    
+                    # Clean chunk if needed
+                    chunk = self.clean_dataframe_chunk(chunk)
+                    
+                    chunks.append(chunk)
+                    total_rows += len(chunk)
+                    chunk_count += 1
+                    
+                    # Update progress every 10 chunks
+                    if chunk_count % 10 == 0:
+                        self.progress_bar.setFormat(f"{status_message} - {total_rows:,} rows processed")
+                        QApplication.processEvents()
+                        
+                except Exception as chunk_error:
+                    print(f"Error processing chunk {chunk_count}: {str(chunk_error)}")
+                    continue
+                    
+            if not chunks:
+                raise Exception("No valid data chunks found")
+                
+            # Combine all chunks efficiently
+            return self.combine_chunks_efficiently(chunks)
+            
+        except Exception as e:
+            # Fallback to regular reading
+            return pd.read_csv(file_path, encoding=encoding, sep=delimiter)
+            
+    def calculate_optimal_chunk_size(self, file_path):
+        """Calculate optimal chunk size based on file size and available memory"""
+        try:
+            file_size = os.path.getsize(file_path)
+            file_size_mb = file_size / (1024 * 1024)
+            
+            # Base chunk size on file size
+            if file_size_mb < 100:
+                return 50000
+            elif file_size_mb < 500:
+                return 100000
+            elif file_size_mb < 1000:
+                return 200000
+            else:
+                return 500000
+                
+        except:
+            return 100000  # Default
+            
+    def optimize_dataframe_dtypes(self, df):
+        """Optimize DataFrame data types for memory efficiency"""
+        try:
+            for col in df.columns:
+                col_type = df[col].dtype
+                
+                if col_type == 'object':
+                    # Try to convert to more efficient types
                     try:
-                        os.unlink(temp_file)
+                        # Try numeric conversion
+                        df[col] = pd.to_numeric(df[col], errors='ignore')
+                        if df[col].dtype == 'float64':
+                            # Try to downcast to float32 if no precision loss
+                            df[col] = pd.to_numeric(df[col], downcast='float')
+                        elif df[col].dtype in ['int64', 'int32']:
+                            # Try to downcast integers
+                            df[col] = pd.to_numeric(df[col], downcast='integer')
                     except:
                         pass
                         
-            self.accept()
+                elif col_type == 'float64':
+                    # Try to downcast float64 to float32
+                    try:
+                        df[col] = pd.to_numeric(df[col], downcast='float')
+                    except:
+                        pass
+                        
+                elif col_type in ['int64', 'int32']:
+                    # Try to downcast integers
+                    try:
+                        df[col] = pd.to_numeric(df[col], downcast='integer')
+                    except:
+                        pass
+                        
+            return df
             
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error merging files: {str(e)}")
+            # Return original DataFrame if optimization fails
+            return df
+            
+    def clean_dataframe_chunk(self, chunk):
+        """Clean and validate DataFrame chunk"""
+        try:
+            # Remove completely empty rows
+            chunk = chunk.dropna(how='all')
+            
+            # Remove duplicate header rows (common in concatenated CSVs)
+            if len(chunk) > 0:
+                header_mask = chunk.astype(str).eq(chunk.columns.astype(str)).all(axis=1)
+                chunk = chunk[~header_mask]
+                
+            return chunk
+            
+        except Exception as e:
+            return chunk
+            
+    def combine_chunks_efficiently(self, chunks):
+        """Efficiently combine DataFrame chunks"""
+        try:
+            if not chunks:
+                return pd.DataFrame()
+                
+            if len(chunks) == 1:
+                return chunks[0]
+                
+            # Use concat with optimized parameters
+            combined = pd.concat(
+                chunks,
+                ignore_index=True,
+                copy=False,  # Avoid unnecessary copying
+                sort=False   # Don't sort columns
+            )
+            
+            # Final cleanup and optimization
+            combined = self.optimize_dataframe_dtypes(combined)
+            
+            # Reset progress bar format
+            self.progress_bar.setFormat("")
+            
+            return combined
+            
+        except Exception as e:
+            # Fallback to simple concatenation
+            return pd.concat(chunks, ignore_index=True)
 
 
 class DataImportDialog(QDialog):
@@ -4115,24 +4900,16 @@ class SQLEditorApp(QMainWindow):
         self.import_data_button.clicked.connect(self.show_import_dialog)
         self.toolbar.addWidget(self.import_data_button)
         
-        # Bulk Excel Import button
-        self.bulk_excel_button = QToolButton()
-        self.bulk_excel_button.setIcon(qta.icon('fa5s.rocket', color=ColorScheme.WARNING))
-        self.bulk_excel_button.setText("Bulk Excel")
-        self.bulk_excel_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.bulk_excel_button.setToolTip("Fast bulk import of all Excel files from a folder (Ctrl+Shift+I)")
-        self.bulk_excel_button.clicked.connect(self.show_bulk_excel_import_dialog)
-        # Bulk import button is always available (will check dependencies when used)
-        self.toolbar.addWidget(self.bulk_excel_button)
+        # Folder Import button
+        self.folder_import_button = QToolButton()
+        self.folder_import_button.setIcon(qta.icon('fa5s.folder-plus', color=ColorScheme.WARNING))
+        self.folder_import_button.setText("Folder Import")
+        self.folder_import_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.folder_import_button.setToolTip("Import entire folders of CSV or Excel files (Ctrl+Shift+F)")
+        self.folder_import_button.clicked.connect(self.show_folder_import_dialog)
+        self.toolbar.addWidget(self.folder_import_button)
         
-        # CSV Merger button
-        self.csv_merger_button = QToolButton()
-        self.csv_merger_button.setIcon(qta.icon('fa5s.layer-group', color=ColorScheme.HIGHLIGHT))
-        self.csv_merger_button.setText("CSV Merger")
-        self.csv_merger_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.csv_merger_button.setToolTip("Merge multiple CSV files into one (Ctrl+Shift+M)")
-        self.csv_merger_button.clicked.connect(self.show_csv_merger_dialog)
-        self.toolbar.addWidget(self.csv_merger_button)
+
         
         # CSV Automation button
         self.csv_automation_button = QToolButton()
@@ -4181,17 +4958,13 @@ class SQLEditorApp(QMainWindow):
         self.import_data_action.setShortcut("Ctrl+I")
         self.import_data_action.triggered.connect(self.show_import_dialog)
         
-        # Bulk Excel import action
-        self.bulk_excel_import_action = QAction(qta.icon('fa5s.rocket', color=ColorScheme.WARNING), "Bulk Excel Import...", self)
-        self.bulk_excel_import_action.setShortcut("Ctrl+Shift+I")
-        self.bulk_excel_import_action.triggered.connect(self.show_bulk_excel_import_dialog)
+        # Folder Import action
+        self.folder_import_action = QAction(qta.icon('fa5s.folder-plus', color=ColorScheme.WARNING), "Folder &Import...", self)
+        self.folder_import_action.setShortcut("Ctrl+Shift+F")
+        self.folder_import_action.setStatusTip("Import entire folders of CSV or Excel files")
+        self.folder_import_action.triggered.connect(self.show_folder_import_dialog)
         
-        # CSV Merger action
-        self.csv_merger_action = QAction(qta.icon('fa5s.layer-group', color=ColorScheme.HIGHLIGHT), "CSV Merger...", self)
-        self.csv_merger_action.setShortcut("Ctrl+Shift+M")
-        self.csv_merger_action.setStatusTip("Merge multiple CSV files into one")
-        self.csv_merger_action.triggered.connect(self.show_csv_merger_dialog)
-        # Bulk import action is always available (will check dependencies when used)
+
         
         # CSV Automation action
         self.csv_automation_action = QAction(qta.icon('fa5s.cogs', color=ColorScheme.ACCENT), "CSV Automation...", self)
@@ -4248,8 +5021,7 @@ class SQLEditorApp(QMainWindow):
         self.db_menu.addAction(self.disconnect_action)
         self.db_menu.addSeparator()
         self.db_menu.addAction(self.import_data_action)
-        self.db_menu.addAction(self.bulk_excel_import_action)
-        self.db_menu.addAction(self.csv_merger_action)
+        self.db_menu.addAction(self.folder_import_action)
         self.db_menu.addAction(self.csv_automation_action)
         
         # Query menu
@@ -4314,40 +5086,23 @@ class SQLEditorApp(QMainWindow):
             # For append and replace modes, table name is already selected from dropdown
             self.start_import_worker(import_info)
     
-    def show_bulk_excel_import_dialog(self):
-        """Show the bulk Excel import dialog"""
+    def show_folder_import_dialog(self):
+        """Show the folder import dialog"""
         if not self.current_connection:
             QMessageBox.warning(self, "No Connection", "Please connect to a database first.")
             return
             
         try:
-            from bulk_excel_import import BulkExcelImportDialog
-            dialog = BulkExcelImportDialog(self, self.current_connection, self.current_connection_info)
+            dialog = FolderImportDialog(self, self.current_connection, self.current_connection_info)
             dialog.exec()
             
             # Always refresh schema browser after dialog closes in case import occurred
             self.refresh_schema_browser()
             self.check_schema_changes()
             
-        except ImportError:
-            QMessageBox.warning(self, "Feature Not Available", 
-                              "Bulk Excel import requires additional dependencies.\n"
-                              "Please install: pip install polars qtawesome")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to open bulk import dialog: {str(e)}")
-    
-    def show_csv_merger_dialog(self):
-        """Show the CSV merger dialog"""
-        try:
-            dialog = CSVMergerDialog(self, self.current_connection, self.current_connection_info)
-            if dialog.exec():
-                # Refresh schema browser after dialog closes in case database import occurred
-                if self.current_connection:
-                    self.refresh_schema_browser()
-                    self.check_schema_changes()
-                    
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to open CSV merger dialog: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to open folder import dialog: {str(e)}")
+
     
     def show_csv_automation_dialog(self):
         """Show the CSV automation dialog"""
@@ -7058,3 +7813,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+                
