@@ -2052,7 +2052,7 @@ class FolderImportDialog(QDialog):
             self.import_btn.setEnabled(True)
             
     def combine_dataframes_safely(self, dataframes):
-        """Safely combine dataframes with proper column alignment"""
+        """Safely combine dataframes with proper column alignment - new columns go to the end"""
         if not dataframes:
             return pd.DataFrame()
             
@@ -2060,23 +2060,29 @@ class FolderImportDialog(QDialog):
             return dataframes[0]
             
         try:
-            # Get all unique columns
-            all_columns = set()
-            for df in dataframes:
-                all_columns.update(df.columns)
-            all_columns = sorted(list(all_columns))
+            # Get the first dataframe's columns as the base order
+            base_columns = list(dataframes[0].columns)
             
-            # Align all dataframes to have the same columns
+            # Find all unique columns across all dataframes
+            all_columns_set = set(base_columns)
+            for df in dataframes[1:]:
+                all_columns_set.update(df.columns)
+            
+            # Create final column order: base columns first, then new columns at the end
+            new_columns = [col for col in all_columns_set if col not in base_columns]
+            all_columns = base_columns + sorted(new_columns)  # Sort only the new columns
+            
+            # Align all dataframes to have the same columns in the correct order
             aligned_dfs = []
             for df in dataframes:
                 aligned_df = df.copy()
                 
-                # Add missing columns with NaN
+                # Add missing columns with NaN at the end
                 for col in all_columns:
                     if col not in aligned_df.columns:
                         aligned_df[col] = pd.NA
                         
-                # Reorder columns
+                # Reorder columns: existing columns first, new columns at the end
                 aligned_df = aligned_df.reindex(columns=all_columns)
                 aligned_dfs.append(aligned_df)
                 
@@ -2084,7 +2090,7 @@ class FolderImportDialog(QDialog):
             return pd.concat(aligned_dfs, ignore_index=True)
             
         except Exception as e:
-            # Fallback to simple concatenation
+            # Fallback to simple concatenation without sorting columns
             return pd.concat(dataframes, ignore_index=True, sort=False)
             
     def safe_database_import(self, df, table_name, mode, main_app):
@@ -6945,7 +6951,7 @@ class SQLEditorApp(QMainWindow):
             return self.safe_import_to_database(df, table_name, mode)
     
     def combine_dataframes_with_alignment(self, dataframes):
-        """Combine multiple dataframes with proper column alignment for folder imports"""
+        """Combine multiple dataframes with proper column alignment - new columns go to the end"""
         if not dataframes:
             return pd.DataFrame()
         
@@ -6953,30 +6959,39 @@ class SQLEditorApp(QMainWindow):
             return dataframes[0]
         
         try:
-            # Get all unique column names across all dataframes
-            all_columns = set()
-            for df in dataframes:
-                all_columns.update(df.columns)
+            # Get the first dataframe's columns as the base order
+            base_columns = list(dataframes[0].columns)
             
-            all_columns = sorted(list(all_columns))
-            print(f"Found {len(all_columns)} unique columns across all files: {all_columns}")
+            # Find all unique column names across all dataframes
+            all_columns_set = set(base_columns)
+            for df in dataframes[1:]:
+                all_columns_set.update(df.columns)
+            
+            # Create final column order: base columns first, then new columns at the end
+            new_columns = [col for col in all_columns_set if col not in base_columns]
+            all_columns = base_columns + sorted(new_columns)  # Sort only the new columns
+            
+            print(f"Found {len(all_columns)} unique columns across all files")
+            print(f"Base columns ({len(base_columns)}): {base_columns}")
+            if new_columns:
+                print(f"New columns added at end ({len(new_columns)}): {sorted(new_columns)}")
             
             # Align all dataframes to have the same columns
             aligned_dataframes = []
             for i, df in enumerate(dataframes):
-                # Create a new dataframe with all columns
+                # Create a new dataframe with all columns in correct order
                 aligned_df = pd.DataFrame(index=df.index)
                 
-                # Copy existing columns
+                # Copy existing columns in their original order
                 for col in df.columns:
                     aligned_df[col] = df[col]
                 
-                # Add missing columns with None values
+                # Add missing columns with None values at the end
                 for col in all_columns:
                     if col not in aligned_df.columns:
                         aligned_df[col] = None
                 
-                # Reorder columns to match the standard order
+                # Reorder columns: existing first, new at the end
                 aligned_df = aligned_df[all_columns]
                 aligned_dataframes.append(aligned_df)
                 print(f"Aligned dataframe {i+1}: {len(aligned_df)} rows, {len(aligned_df.columns)} columns")
@@ -6995,7 +7010,7 @@ class SQLEditorApp(QMainWindow):
             
         except Exception as e:
             print(f"Error combining dataframes: {e}")
-            # Fallback: try simple concatenation
+            # Fallback: try simple concatenation without sorting columns
             try:
                 combined_df = pd.concat(dataframes, ignore_index=True, sort=False)
                 # Fill missing values
@@ -7444,8 +7459,8 @@ class SQLEditorApp(QMainWindow):
             for col in extra_table_columns:
                 df[col] = None
             
-            # Reorder dataframe columns to match table schema (existing + new)
-            all_columns = list(existing_columns) + list(missing_columns)
+            # Reorder dataframe columns to match table schema: existing columns first, new columns at the end
+            all_columns = list(existing_columns) + sorted(list(missing_columns))
             df = df.reindex(columns=all_columns)
             
             # Convert all data to strings to prevent type conflicts
