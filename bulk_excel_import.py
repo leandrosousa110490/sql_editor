@@ -166,19 +166,23 @@ class BulkExcelProcessor:
         return sorted(excel_files)
 
     def clean_column_name(self, name: str) -> str:
-        """Clean column name for SQL compatibility"""
+        """Clean column name for SQL compatibility - capitalize and replace special chars with underscores"""
         # Remove or replace problematic characters
         name = str(name).strip()
-        name = re.sub(r'[^\w\s]', '_', name)  # Replace special chars with underscore
-        name = re.sub(r'\s+', '_', name)      # Replace spaces with underscore
-        name = re.sub(r'_+', '_', name)       # Replace multiple underscores with single
-        name = name.strip('_')                # Remove leading/trailing underscores
+        
+        # Convert to uppercase
+        name = name.upper()
+        
+        # Replace spaces and special characters with underscores
+        name = re.sub(r'[^A-Z0-9_]', '_', name)  # Replace non-alphanumeric chars with underscore
+        name = re.sub(r'_+', '_', name)          # Replace multiple underscores with single
+        name = name.strip('_')                   # Remove leading/trailing underscores
         
         # Ensure it doesn't start with a number
         if name and name[0].isdigit():
-            name = f"col_{name}"
+            name = f"COL_{name}"
         
-        return name or "unnamed_column"
+        return name or "UNNAMED_COLUMN"
 
     def read_excel_optimized(self, file_path: str, sheet_name: Optional[str] = None) -> pd.DataFrame:
         """Read Excel file using the best available method"""
@@ -878,4 +882,4 @@ def show_bulk_excel_import_dialog(parent=None, connection=None, connection_info=
 if __name__ == "__main__":
     print("Bulk Excel Import Module")
     print(f"Polars available: {POLARS_AVAILABLE}")
-    print("This module provides high-performance bulk Excel import capabilities.") 
+    print("This module provides high-performance bulk Excel import capabilities.")

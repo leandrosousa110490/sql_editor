@@ -428,7 +428,11 @@ class SQLHighlighter(QSyntaxHighlighter):
             'SELECT', 'FROM', 'WHERE', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'ALTER', 'DROP',
             'TRUNCATE', 'BEGIN', 'COMMIT', 'ROLLBACK', 'DISTINCT', 'AS', 'INTO', 'VALUES', 'SET',
             'GROUP BY', 'ORDER BY', 'HAVING', 'LIMIT', 'OFFSET', 'UNION', 'UNION ALL',
-            'INTERSECT', 'EXCEPT', 'WITH', 'RECURSIVE'
+            'INTERSECT', 'EXCEPT', 'WITH', 'RECURSIVE', 'JOIN', 'INNER JOIN', 'LEFT JOIN',
+            'RIGHT JOIN', 'FULL JOIN', 'FULL OUTER JOIN', 'CROSS JOIN', 'ON', 'USING',
+            'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'IF', 'IFNULL', 'ISNULL',
+            'PRIMARY KEY', 'FOREIGN KEY', 'REFERENCES', 'CONSTRAINT', 'UNIQUE', 'INDEX',
+            'VIEW', 'TRIGGER', 'PROCEDURE', 'FUNCTION', 'DECLARE', 'RETURN'
         ]
         
         for keyword in sql_keywords:
@@ -466,7 +470,13 @@ class SQLHighlighter(QSyntaxHighlighter):
         functions = [
             'COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'GROUP_CONCAT', 'COALESCE', 'NULLIF',
             'CAST', 'CONVERT', 'SUBSTRING', 'SUBSTR', 'LENGTH', 'UPPER', 'LOWER',
-            'TRIM', 'LTRIM', 'RTRIM', 'REPLACE', 'NOW', 'CURRENT_DATE', 'CURRENT_TIME'
+            'TRIM', 'LTRIM', 'RTRIM', 'REPLACE', 'NOW', 'CURRENT_DATE', 'CURRENT_TIME',
+            'ROUND', 'FLOOR', 'CEIL', 'ABS', 'SQRT', 'POWER', 'MOD', 'RANDOM',
+            'CONCAT', 'CONCAT_WS', 'LEFT', 'RIGHT', 'REVERSE', 'REPEAT', 'SPACE',
+            'STRFTIME', 'DATE', 'TIME', 'DATETIME', 'JULIANDAY', 'UNIXEPOCH',
+            'ROW_NUMBER', 'RANK', 'DENSE_RANK', 'LAG', 'LEAD', 'FIRST_VALUE', 'LAST_VALUE',
+            'NTILE', 'PERCENT_RANK', 'CUME_DIST', 'OVER', 'PARTITION BY',
+            'JSON_EXTRACT', 'JSON_ARRAY', 'JSON_OBJECT', 'JSON_VALID'
         ]
         
         for function in functions:
@@ -847,6 +857,29 @@ class EnhancedQueryWorker(QThread):
         try:
             start_time = datetime.now()
             
+            # Check if this is a DDL statement that doesn't return results
+            query_upper = self.query.strip().upper()
+            ddl_keywords = ['ALTER TABLE', 'CREATE TABLE', 'DROP TABLE', 'CREATE VIEW', 'DROP VIEW', 
+                          'CREATE INDEX', 'DROP INDEX', 'INSERT INTO', 'UPDATE ', 'DELETE FROM']
+            is_ddl = any(query_upper.startswith(keyword) for keyword in ddl_keywords)
+            
+            if is_ddl:
+                # Execute DDL statement directly without expecting results
+                if isinstance(self.connection, sqlite3.Connection):
+                    cursor = self.connection.cursor()
+                    cursor.execute(self.query)
+                    self.connection.commit()
+                elif isinstance(self.connection, duckdb.DuckDBPyConnection):
+                    self.connection.execute(self.query)
+                else:
+                    raise ValueError("Unsupported database connection type")
+                
+                # Return empty DataFrame for DDL operations
+                execution_time = (datetime.now() - start_time).total_seconds()
+                empty_df = pd.DataFrame({'Result': ['Query executed successfully']})
+                self.finished.emit(empty_df, execution_time)
+                return
+            
             if self.use_lazy_loading:
                 # Check if we should use lazy loading by estimating row count
                 should_use_lazy = self._should_use_lazy_loading()
@@ -868,7 +901,22 @@ class EnhancedQueryWorker(QThread):
             self.finished.emit(df, execution_time)
             
         except Exception as e:
-            self.error.emit(str(e))
+            # Enhanced error handling with more specific messages
+            error_msg = str(e)
+            
+            # Provide more helpful error messages for common issues
+            if "no such table" in error_msg.lower():
+                error_msg += "\n\nTip: Check if the table name is correct and exists in the database."
+            elif "no such column" in error_msg.lower():
+                error_msg += "\n\nTip: Check if the column name is correct and exists in the table."
+            elif "syntax error" in error_msg.lower():
+                error_msg += "\n\nTip: Check your SQL syntax. Common issues include missing quotes, incorrect keywords, or typos."
+            elif "alter table" in error_msg.lower():
+                error_msg += "\n\nTip: ALTER TABLE operations have limitations. For SQLite, some operations require recreating the table."
+            elif "permission" in error_msg.lower() or "access" in error_msg.lower():
+                error_msg += "\n\nTip: Check if you have the necessary permissions to perform this operation."
+            
+            self.error.emit(error_msg)
     
     def _should_use_lazy_loading(self):
         """Determine if lazy loading should be used based on estimated result size"""
@@ -2220,18 +2268,22 @@ class FolderImportDialog(QDialog):
             raise e
             
     def clean_column_name(self, name):
-        """Clean column name for SQL compatibility"""
+        """Clean column name for SQL compatibility - capitalize and replace special chars with underscores"""
         import re
         name = str(name).strip()
-        name = re.sub(r'[^\w\s]', '_', name)
-        name = re.sub(r'\s+', '_', name)  
-        name = re.sub(r'_+', '_', name)
-        name = name.strip('_')
+        
+        # Convert to uppercase
+        name = name.upper()
+        
+        # Replace spaces and special characters with underscores
+        name = re.sub(r'[^A-Z0-9_]', '_', name)  # Replace non-alphanumeric chars with underscore
+        name = re.sub(r'_+', '_', name)          # Replace multiple underscores with single
+        name = name.strip('_')                   # Remove leading/trailing underscores
         
         if name and name[0].isdigit():
-            name = f"col_{name}"
+            name = f"COL_{name}"
             
-        return name or "unnamed_column"
+        return name or "UNNAMED_COLUMN"
         
     def clean_table_name(self, name):
         """Clean table name for SQL compatibility"""
@@ -4429,9 +4481,27 @@ class SchemaBrowser(QTreeWidget):
         
         if reply == QMessageBox.StandardButton.Yes:
             try:
-                # Note: SQLite has limited ALTER TABLE support, so we need different approaches
+                # Enhanced ALTER TABLE support with better error handling
                 success = False
                 error_messages = []
+                
+                # First, check if the column exists
+                try:
+                    if self.connection_info['type'].lower() in ['sqlite', 'sqlite3']:
+                        cursor = self.connection.cursor()
+                        cursor.execute(f"PRAGMA table_info({table_name})")
+                        columns = [row[1] for row in cursor.fetchall()]
+                    else:  # DuckDB
+                        result = self.connection.execute(f"DESCRIBE {table_name}").fetchall()
+                        columns = [row[0] for row in result]
+                    
+                    if column_name not in columns:
+                        QMessageBox.warning(self, "Column Not Found", f"Column '{column_name}' does not exist in table '{table_name}'.")
+                        return
+                        
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to verify column existence: {str(e)}")
+                    return
                 
                 if self.connection_info['type'].lower() in ['sqlite', 'sqlite3']:
                     # For SQLite, we need to recreate the table without the column
@@ -7511,12 +7581,15 @@ class SQLEditorApp(QMainWindow):
             return self.safe_import_to_database(df, table_name, 'append')
     
     def clean_column_name(self, column_name):
-        """Clean column name for database compatibility"""
+        """Clean column name for database compatibility - capitalize and replace special chars with underscores"""
         # Convert to string and strip whitespace
         clean_name = str(column_name).strip()
         
+        # Convert to uppercase
+        clean_name = clean_name.upper()
+        
         # Replace spaces and special characters with underscores
-        clean_name = re.sub(r'[^a-zA-Z0-9_]', '_', clean_name)
+        clean_name = re.sub(r'[^A-Z0-9_]', '_', clean_name)
         
         # Remove consecutive underscores
         clean_name = re.sub(r'_+', '_', clean_name)
@@ -7526,11 +7599,11 @@ class SQLEditorApp(QMainWindow):
         
         # Ensure it starts with a letter or underscore
         if clean_name and not clean_name[0].isalpha() and clean_name[0] != '_':
-            clean_name = f"col_{clean_name}"
+            clean_name = f"COL_{clean_name}"
         
         # Handle empty names
         if not clean_name:
-            clean_name = "unnamed_column"
+            clean_name = "UNNAMED_COLUMN"
         
         return clean_name
     

@@ -50,18 +50,22 @@ logger = logging.getLogger(__name__)
 
 
 def clean_column_name(name: str) -> str:
-    """Clean column name for SQL compatibility"""
+    """Clean column name for SQL compatibility - capitalize and replace special chars with underscores"""
     name = str(name).strip()
-    name = re.sub(r'[^\w\s]', '_', name)  # Replace special chars with underscore
-    name = re.sub(r'\s+', '_', name)      # Replace spaces with underscore
-    name = re.sub(r'_+', '_', name)       # Replace multiple underscores with single
-    name = name.strip('_')                # Remove leading/trailing underscores
+    
+    # Convert to uppercase
+    name = name.upper()
+    
+    # Replace spaces and special characters with underscores
+    name = re.sub(r'[^A-Z0-9_]', '_', name)  # Replace non-alphanumeric chars with underscore
+    name = re.sub(r'_+', '_', name)          # Replace multiple underscores with single
+    name = name.strip('_')                   # Remove leading/trailing underscores
     
     # Ensure it doesn't start with a number
     if name and name[0].isdigit():
-        name = f"col_{name}"
+        name = f"COL_{name}"
     
-    return name or "unnamed_column"
+    return name or "UNNAMED_COLUMN"
 
 
 def read_excel_optimized(file_path: str, sheet_name: Optional[str] = None) -> pd.DataFrame:
@@ -1813,7 +1817,23 @@ class CSVAutomationWorker(QThread):
                     
                 except Exception as e:
                     logger.error(f"Error executing SQL query: {e}")
-                    self.error.emit(f"Error executing SQL query: {str(e)}")
+                    
+                    # Enhanced error handling with more specific messages
+                    error_msg = str(e)
+                    
+                    # Provide more helpful error messages for common issues
+                    if "no such table" in error_msg.lower():
+                        error_msg += "\n\nTip: Check if the table name matches your configured CSV source names."
+                    elif "no such column" in error_msg.lower():
+                        error_msg += "\n\nTip: Check if the column name exists in your CSV data. Remember column names are now capitalized with underscores."
+                    elif "syntax error" in error_msg.lower():
+                        error_msg += "\n\nTip: Check your SQL syntax. Common issues include missing quotes, incorrect keywords, or typos."
+                    elif "alter table" in error_msg.lower():
+                        error_msg += "\n\nTip: ALTER TABLE operations have limitations. Consider using CREATE TABLE AS SELECT instead."
+                    elif "permission" in error_msg.lower() or "access" in error_msg.lower():
+                        error_msg += "\n\nTip: Check if you have the necessary permissions to perform this operation."
+                    
+                    self.error.emit(f"Error executing SQL query: {error_msg}")
                     return
             
             results['execution_time'] = time.time() - start_time
@@ -2796,4 +2816,4 @@ if __name__ == "__main__":
     dialog = CSVAutomationDialog(None, conn, conn_info)
     dialog.show()
     
-    sys.exit(app.exec()) 
+    sys.exit(app.exec())
