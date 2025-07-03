@@ -1,0 +1,24 @@
+{
+  "version": "1.0",
+  "created": "2025-07-02T20:46:04.505317",
+  "description": "CSV Automation Configuration",
+  "sources": [
+    {
+      "table_name": "csv",
+      "mode": "csv_folder",
+      "file_type": "csv",
+      "folder_path": "C:/Users/nbaba/Desktop/csv",
+      "file_pattern": "*.csv"
+    },
+    {
+      "table_name": "test_excel_bulk",
+      "mode": "excel_folder",
+      "file_type": "excel",
+      "folder_path": "C:/Users/nbaba/Desktop/test_excel_bulk",
+      "file_pattern": "*.xlsx",
+      "sheet_selection": "First sheet only",
+      "sheet_name": ""
+    }
+  ],
+  "sql_query": "SELECT * FROM csv"
+}

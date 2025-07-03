@@ -1,0 +1,20 @@
+{
+  "sources": [
+    {
+      "path": "C:/Users/nbaba/Desktop/csv",
+      "table_name": "csv",
+      "mode": "csv_folder",
+      "file_type": "csv"
+    },
+    {
+      "path": "C:/Users/nbaba/Desktop/test_excel_bulk",
+      "table_name": "test_excel_bulk",
+      "mode": "excel_folder",
+      "file_type": "excel",
+      "sheet_selection": "First sheet only",
+      "sheet_name": ""
+    }
+  ],
+  "sql_query": "SELECT * from csv",
+  "output_table": "query_result_20250703_065246"
+}
